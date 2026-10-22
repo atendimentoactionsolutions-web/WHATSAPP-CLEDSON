@@ -3,6 +3,7 @@ Thumbs.db
 .DS_Store
 node_modules/
 .wa-session/
+data/
 qrcode.png
 .env
 .env.*
