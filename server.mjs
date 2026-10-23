@@ -1685,21 +1685,26 @@ app.get(["/", "/qr"], async (req, res) => {
         const hasImg = !!ad.imageBase64;
         const isEnabled = !!ad.enabled;
 
+        const imgHtml = hasImg 
+          ? '<img src="' + ad.imageBase64 + '" class="gallery-thumb" alt="Foto" />'
+          : '<div class="gallery-thumb-placeholder">📷 Sem foto anexada</div>';
+
+        const titleText = ad.name || 'Anúncio sem nome';
+        const captionText = ad.caption || '<em>(Sem texto/legenda cadastrada)</em>';
+        const statusText = isEnabled ? '✅ Usar no Disparo' : '⏸️ Pausado';
+
         return \`
           <div class="gallery-card \${isEnabled ? 'selected-for-campaign' : ''}">
             <div>
-              \${hasImg 
-                ? \`<img src="\${ad.imageBase64}" class="gallery-thumb" alt="Foto" />\` 
-                : \`<div class="gallery-thumb-placeholder">📷 Sem foto anexada</div>\`
-              }
-              <div class="gallery-card-title">\${ad.name || 'Anúncio sem nome'}</div>
-              <div class="gallery-card-caption">\${ad.caption || '<em>(Sem texto/legenda cadastrada)</em>'}</div>
+              \${imgHtml}
+              <div class="gallery-card-title">\${titleText}</div>
+              <div class="gallery-card-caption">\${captionText}</div>
             </div>
 
             <div class="gallery-actions">
               <label class="select-tag" title="Marque para incluir este anúncio na rotação de envio nos grupos">
                 <input type="checkbox" \${isEnabled ? 'checked' : ''} onchange="toggleGalleryAdSelect('\${ad.id}')" />
-                <span>\${isEnabled ? '✅ Usar no Disparo' : '⏸️ Pausado'}</span>
+                <span>\${statusText}</span>
               </label>
               <div style="margin-left:auto;display:flex;gap:6px;">
                 <button class="btn" style="padding:6px 10px;font-size:12px;" onclick="editAdFromGallery(\${realIndex})" title="Editar foto e texto">✏️ Editar</button>
