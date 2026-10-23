@@ -1294,15 +1294,15 @@ app.get(["/", "/qr"], async (req, res) => {
       <!-- Coluna Direita: Seleção de Grupos de Vendas + Progresso ao Vivo -->
       <div class="panel">
         <div class="panel-title">
-          <span>2. Meus Grupos de Vendas (<span id="selectedCounter">0</span> selecionados)</span>
+          <span>2. Meus Grupos de Vendas (<span id="selectedCounter">0</span> de <span id="totalActiveCounter">0</span> ativos)</span>
           <button class="btn" onclick="loadGroups(true)" id="refreshGroupsBtn">🔄 Atualizar Grupos</button>
         </div>
-        <p class="panel-sub">Marque apenas os grupos de vendas/atacado. Sua seleção fica salva automaticamente na VPS.</p>
+        <p class="panel-sub">Marque os grupos que devem receber as ofertas. Sua seleção fica salva automaticamente na VPS.</p>
 
         <div class="group-toolbar">
           <input type="text" id="groupSearch" class="group-search" placeholder="🔍 Buscar grupo pelo nome..." oninput="renderGroups()" />
-          <button class="btn" onclick="toggleAllFiltered(true)">Marcar Visíveis</button>
-          <button class="btn" onclick="toggleAllFiltered(false)">Desmarcar</button>
+          <button class="btn" style="background:#25d366;color:#0b141a;font-weight:700;" onclick="selectAllGroups(true)">✓ Selecionar Todos</button>
+          <button class="btn" onclick="selectAllGroups(false)">Desmarcar Todos</button>
         </div>
 
         <div class="groups-list" id="groupsList">
