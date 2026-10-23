@@ -522,6 +522,78 @@ async function initWhatsApp(forceReset = false) {
       waSocket = sock;
       sock.ev.on("creds.update", saveCreds);
 
+      // ─── Detecção Automática e Instantânea de Novos Grupos (100% sem fantasmas) ───
+      // 1. Quando você entra em um grupo ou alguém te adiciona
+      sock.ev.on("group-participants.update", async (event) => {
+        try {
+          const { id, action, participants } = event;
+          const myJid = waSocket?.user?.id?.split(":")[0];
+          const addedMe = Array.isArray(participants) && participants.some((p) => p.includes(myJid));
+          if (action === "add" && (addedMe || !cachedGroups.some((g) => g.id === id))) {
+            console.log(`🔔 [AUTO-SYNC] Novo grupo detectado via evento de participantes: ${id}`);
+            await delay(1500); // aguarda Baileys atualizar metadados
+            try {
+              const meta = await waSocket.groupMetadata(id);
+              const formatted = formatGroupObject(meta);
+              if (formatted) {
+                cachedGroups = cachedGroups.filter((g) => g.id !== formatted.id);
+                cachedGroups.push(formatted);
+                cachedGroups.sort((a, b) => a.subject.localeCompare(b.subject, "pt-BR"));
+                console.log(`✅ [AUTO-SYNC] Grupo adicionado automaticamente ao sistema: "${formatted.subject}" (${formatted.size} membros)`);
+              }
+            } catch (metaErr) {
+              await refreshGroups().catch(() => {});
+            }
+          }
+        } catch (e) {
+          console.error("Erro no listener group-participants.update:", e);
+        }
+      });
+
+      // 2. Quando um novo chat de grupo aparece ou é criado
+      sock.ev.on("chats.upsert", async (newChats) => {
+        try {
+          if (!Array.isArray(newChats)) return;
+          for (const chat of newChats) {
+            const jid = chat.id;
+            if (jid && jid.endsWith("@g.us") && !cachedGroups.some((g) => g.id === jid)) {
+              console.log(`🔔 [AUTO-SYNC] Novo chat de grupo detectado: ${jid}`);
+              await delay(1200);
+              try {
+                const meta = await waSocket.groupMetadata(jid);
+                const formatted = formatGroupObject(meta);
+                if (formatted) {
+                  cachedGroups = cachedGroups.filter((g) => g.id !== formatted.id);
+                  cachedGroups.push(formatted);
+                  cachedGroups.sort((a, b) => a.subject.localeCompare(b.subject, "pt-BR"));
+                  console.log(`✅ [AUTO-SYNC] Grupo sincronizado automaticamente: "${formatted.subject}"`);
+                }
+              } catch (metaErr) {
+                await refreshGroups().catch(() => {});
+              }
+            }
+          }
+        } catch (e) {
+          console.error("Erro no listener chats.upsert:", e);
+        }
+      });
+
+      // 3. Atualização de assunto/nome do grupo
+      sock.ev.on("groups.update", async (updates) => {
+        try {
+          if (!Array.isArray(updates)) return;
+          for (const u of updates) {
+            if (u.id && u.subject) {
+              const existing = cachedGroups.find((g) => g.id === u.id);
+              if (existing) {
+                existing.subject = u.subject.trim();
+                cachedGroups.sort((a, b) => a.subject.localeCompare(b.subject, "pt-BR"));
+              }
+            }
+          }
+        } catch (e) {}
+      });
+
       // Comandos pelo próprio celular
       sock.ev.on("messages.upsert", async ({ messages }) => {
         if (!Array.isArray(messages)) return;
