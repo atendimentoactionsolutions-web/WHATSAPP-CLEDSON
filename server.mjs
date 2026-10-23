@@ -267,14 +267,90 @@ function formatGroupObject(g) {
   };
 }
 
-// Buscar todos os grupos em que o número conectado participa (filtrado e sem fantasmas)
+// Cache persistente de metadados de grupos para nunca perder nomes resolvidos
+const GROUP_META_CACHE_FILE = path.join(DATA_DIR, "group_meta_cache.json");
+let groupMetaCache = {};
+try {
+  if (fs.existsSync(GROUP_META_CACHE_FILE)) {
+    groupMetaCache = JSON.parse(fs.readFileSync(GROUP_META_CACHE_FILE, "utf-8"));
+  }
+} catch (e) {
+  groupMetaCache = {};
+}
+
+function saveGroupMetaCache() {
+  try {
+    fs.writeFileSync(GROUP_META_CACHE_FILE, JSON.stringify(groupMetaCache, null, 2));
+  } catch (e) {}
+}
+
+let isResolvingMeta = false;
+
+// Resolver metadados dos grupos que o WhatsApp não entregou o nome de primeira
+async function resolveMissingGroupMetadata(groupsList) {
+  if (isResolvingMeta || !waSocket || waStatus !== "CONNECTED") return;
+  isResolvingMeta = true;
+
+  try {
+    const missing = groupsList.filter((g) => !g.subject && g.id);
+    if (missing.length === 0) return;
+
+    console.log(`🔍 [METADATA] Resolvendo nomes de ${missing.length} grupos em segundo plano...`);
+    let updatedCount = 0;
+
+    for (const item of missing) {
+      if (groupMetaCache[item.id]?.subject) {
+        item.subject = groupMetaCache[item.id].subject;
+        item.size = groupMetaCache[item.id].size || item.size;
+        updatedCount++;
+        continue;
+      }
+
+      try {
+        const meta = await waSocket.groupMetadata(item.id);
+        if (meta && meta.subject) {
+          item.subject = meta.subject.trim();
+          item.size = meta.size || (Array.isArray(meta.participants) ? meta.participants.length : item.size);
+          item.announce = !!meta.announce;
+          item.restrict = !!meta.restrict;
+
+          groupMetaCache[item.id] = {
+            subject: item.subject,
+            size: item.size,
+            announce: item.announce,
+          };
+          updatedCount++;
+        }
+        await delay(300);
+      } catch (err) {}
+    }
+
+    if (updatedCount > 0) {
+      saveGroupMetaCache();
+      console.log(`✅ [METADATA] ${updatedCount} nomes de grupos resolvidos com sucesso!`);
+    }
+  } catch (e) {
+    console.error("Erro ao resolver metadados:", e);
+  } finally {
+    isResolvingMeta = false;
+  }
+}
+
+// Buscar todos os grupos em que o número conectado participa (100% dos grupos resolvidos)
 async function refreshGroups() {
   if (!waSocket || waStatus !== "CONNECTED") return cachedGroups;
   try {
     const all = await waSocket.groupFetchAllParticipating();
     const map = new Map();
+    const rawList = Object.values(all || {});
 
-    for (const g of Object.values(all || {})) {
+    // 1. Aplica cache salvo de nomes para grupos que vieram sem subject
+    for (const g of rawList) {
+      if (!g.subject && groupMetaCache[g.id]?.subject) {
+        g.subject = groupMetaCache[g.id].subject;
+        g.size = groupMetaCache[g.id].size || g.size;
+        g.announce = groupMetaCache[g.id].announce ?? g.announce;
+      }
       const formatted = formatGroupObject(g);
       if (formatted) map.set(formatted.id, formatted);
     }
@@ -282,6 +358,22 @@ async function refreshGroups() {
     const list = Array.from(map.values());
     list.sort((a, b) => a.subject.localeCompare(b.subject, "pt-BR"));
     cachedGroups = list;
+
+    // 2. Dispara resolução em background dos que ainda faltam nome
+    const stillMissing = rawList.filter((g) => !g.subject);
+    if (stillMissing.length > 0) {
+      resolveMissingGroupMetadata(stillMissing).then(() => {
+        for (const g of stillMissing) {
+          if (g.subject) {
+            const fmt = formatGroupObject(g);
+            if (fmt) map.set(fmt.id, fmt);
+          }
+        }
+        cachedGroups = Array.from(map.values());
+        cachedGroups.sort((a, b) => a.subject.localeCompare(b.subject, "pt-BR"));
+      });
+    }
+
     return cachedGroups;
   } catch (err) {
     console.error("Erro ao buscar grupos:", err.message);
