@@ -829,6 +829,44 @@ const app = express();
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
+// GET /invites — grupos descobertos nas conversas que o usuário ainda não participa
+app.get("/invites", async (req, res) => {
+  const currentGroupIds = new Set(cachedGroups.map((g) => g.id));
+  const invitesList = Array.from(detectedInvites.values());
+  const resolved = [];
+
+  for (const inv of invitesList) {
+    let groupMeta = null;
+    let alreadyIn = false;
+
+    if (waSocket && waStatus === "CONNECTED") {
+      try {
+        groupMeta = await waSocket.groupGetInviteInfo(inv.code);
+        if (groupMeta && groupMeta.id) {
+          alreadyIn = currentGroupIds.has(groupMeta.id);
+        }
+      } catch (e) {
+        groupMeta = { error: e.message || "Inválido ou expirado" };
+      }
+    }
+
+    resolved.push({
+      ...inv,
+      groupMeta,
+      alreadyIn,
+    });
+  }
+
+  // Filtrar apenas os que ainda NÃO faz parte e não deram erro
+  const newGroups = resolved.filter((r) => !r.alreadyIn);
+
+  res.json({
+    totalDetected: invitesList.length,
+    newGroupsCount: newGroups.length,
+    invites: newGroups,
+  });
+});
+
 // GET /status
 app.get("/status", (req, res) => {
   res.json({
