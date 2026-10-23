@@ -1460,33 +1460,41 @@ app.get(["/", "/qr"], async (req, res) => {
 
         <!-- Conteúdo do Anúncio Ativo -->
         <div class="ad-card" id="adEditorCard">
-          <div class="ad-card-header">
-            <input type="text" id="adNameInput" class="ad-name-input" placeholder="Nome do Anúncio" oninput="onAdFieldChange()" />
-            <label class="ad-toggle-label">
-              <input type="checkbox" id="adEnabledCheck" onchange="onAdFieldChange()" checked />
-              Incluir no Disparo
+          <div id="adEditorContent">
+            <div class="ad-card-header">
+              <input type="text" id="adNameInput" class="ad-name-input" placeholder="Nome do Anúncio" oninput="onAdFieldChange()" />
+              <label class="ad-toggle-label">
+                <input type="checkbox" id="adEnabledCheck" onchange="onAdFieldChange()" checked />
+                Incluir no Disparo
+              </label>
+            </div>
+
+            <label style="font-size:12px;font-weight:600;color:#d1d7db;display:block;margin-bottom:6px;">
+              📸 Foto do Anúncio (Clique, Arraste ou Cole com Ctrl+V)
             </label>
-          </div>
-
-          <label style="font-size:12px;font-weight:600;color:#d1d7db;display:block;margin-bottom:6px;">
-            📸 Foto do Anúncio (Clique, Arraste ou Cole com Ctrl+V)
-          </label>
-          <div class="upload-zone" id="uploadZone" onclick="document.getElementById('fileInput').click()">
-            <input type="file" id="fileInput" accept="image/*" onchange="handleFileSelect(event)" />
-            <div id="uploadPlaceholder">
-              <div style="font-size:26px;margin-bottom:4px;">🖼️</div>
-              <div style="font-size:13px;font-weight:600;color:#fff;">Clique para adicionar foto ou cole (Ctrl+V)</div>
+            <div class="upload-zone" id="uploadZone" onclick="document.getElementById('fileInput').click()">
+              <input type="file" id="fileInput" accept="image/*" onchange="handleFileSelect(event)" />
+              <div id="uploadPlaceholder">
+                <div style="font-size:26px;margin-bottom:4px;">🖼️</div>
+                <div style="font-size:13px;font-weight:600;color:#fff;">Clique para adicionar foto ou cole (Ctrl+V)</div>
+              </div>
+              <div id="uploadPreview" class="preview-container" style="display:none;">
+                <img id="previewImg" src="" alt="Foto" />
+                <button type="button" class="remove-img-btn" onclick="removeImage(event)">🗑️ Remover Foto</button>
+              </div>
             </div>
-            <div id="uploadPreview" class="preview-container" style="display:none;">
-              <img id="previewImg" src="" alt="Foto" />
-              <button type="button" class="remove-img-btn" onclick="removeImage(event)">🗑️ Remover Foto</button>
-            </div>
-          </div>
 
-          <label style="font-size:12px;font-weight:600;color:#d1d7db;display:block;margin-bottom:6px;">
-            📝 Descrição / Legenda
-          </label>
-          <textarea id="captionInput" placeholder="Digite o texto deste anúncio..." oninput="onAdFieldChange()"></textarea>
+            <label style="font-size:12px;font-weight:600;color:#d1d7db;display:block;margin-bottom:6px;">
+              📝 Descrição / Legenda
+            </label>
+            <textarea id="captionInput" placeholder="Digite o texto deste anúncio..." oninput="onAdFieldChange()"></textarea>
+          </div>
+          <div id="adEditorEmpty" style="display:none;padding:32px 16px;text-align:center;">
+            <div style="font-size:32px;margin-bottom:8px;">🖼️</div>
+            <div style="font-size:15px;font-weight:700;color:#fff;margin-bottom:6px;">Nenhum Anúncio Selecionado no Banco</div>
+            <p style="font-size:13px;color:var(--muted);margin-bottom:16px;">Vá até a aba <strong>Banco de Anúncios</strong> e marque a caixinha "Usar no Disparo" nos produtos que deseja disparar hoje.</p>
+            <button class="btn" style="background:var(--green);color:#0b141a;font-weight:700;" onclick="switchMainView('galeria')">Ir para o Banco de Anúncios</button>
+          </div>
         </div>
 
         <!-- Modo de Rotação / Mesclagem -->
