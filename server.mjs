@@ -718,18 +718,22 @@ app.get("/status", (req, res) => {
   });
 });
 
-// GET /debug-raw-groups
-app.get("/debug-raw-groups", async (req, res) => {
-  if (!waSocket || waStatus !== "CONNECTED") {
-    return res.status(503).json({ error: "WhatsApp não conectado" });
-  }
+// GET /test-fetch-meta
+app.get("/test-fetch-meta", async (req, res) => {
+  if (!waSocket || waStatus !== "CONNECTED") return res.status(503).json({ error: "WA offline" });
   try {
     const all = await waSocket.groupFetchAllParticipating();
-    const list = Object.values(all || {});
-    res.json({
-      total: list.length,
-      sample: list.slice(0, 10).map((g) => ({ id: g.id, subject: g.subject, size: g.size })),
-    });
+    const withoutSubj = Object.values(all || {}).filter(g => !g.subject);
+    const results = [];
+    for (const g of withoutSubj.slice(0, 5)) {
+      try {
+        const meta = await waSocket.groupMetadata(g.id);
+        results.push({ id: g.id, fetchedSubject: meta.subject, size: meta.size || meta.participants?.length });
+      } catch (e) {
+        results.push({ id: g.id, error: e.message });
+      }
+    }
+    res.json({ totalWithoutSubj: withoutSubj.length, sampleResolved: results });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
