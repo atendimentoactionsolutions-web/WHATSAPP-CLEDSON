@@ -183,13 +183,17 @@ async function refreshGroups() {
   if (!waSocket || waStatus !== "CONNECTED") return cachedGroups;
   try {
     const all = await waSocket.groupFetchAllParticipating();
-    const list = Object.values(all || {}).map((g) => ({
-      id: g.id,
-      subject: g.subject || "Grupo sem nome",
-      size: Array.isArray(g.participants) ? g.participants.length : g.size || 0,
-      announce: !!g.announce,
-      restrict: !!g.restrict,
-    }));
+    const list = Object.values(all || {})
+      .map((g) => ({
+        id: g.id,
+        subject: (g.subject || "").trim(),
+        size: Array.isArray(g.participants) ? g.participants.length : g.size || 0,
+        announce: !!g.announce,
+        restrict: !!g.restrict,
+      }))
+      // Ignora subgrupos fantasmas sem nome e com 0 membros
+      .filter((g) => g.subject.length > 0 && g.size > 0);
+
     list.sort((a, b) => a.subject.localeCompare(b.subject, "pt-BR"));
     cachedGroups = list;
     return cachedGroups;
