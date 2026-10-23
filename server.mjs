@@ -184,13 +184,35 @@ async function refreshGroups() {
   try {
     const all = await waSocket.groupFetchAllParticipating();
     const list = Object.values(all || {})
-      .map((g) => ({
-        id: g.id,
-        subject: (g.subject || "").trim(),
-        size: Array.isArray(g.participants) ? g.participants.length : g.size || 0,
-        announce: !!g.announce,
-        restrict: !!g.restrict,
-      }))
+      .map((g) => {
+        const parts = Array.isArray(g.participants) ? g.participants : [];
+        const size = parts.length || g.size || 0;
+        let ddd11Count = 0;
+        let knownPhoneCount = 0;
+        for (const p of parts) {
+          const jidStr = p.phoneNumber || p.jid || p.id || "";
+          // Extrai apenas dígitos antes do @
+          const num = jidStr.split("@")[0].split(":")[0].replace(/\D/g, "");
+          if (num.startsWith("55") && num.length >= 12) {
+            knownPhoneCount++;
+            if (num.slice(2, 4) === "11") {
+              ddd11Count++;
+            }
+          }
+        }
+        const ddd11Pct = knownPhoneCount > 0 ? Math.round((ddd11Count / knownPhoneCount) * 100) : null;
+
+        return {
+          id: g.id,
+          subject: (g.subject || "").trim(),
+          size,
+          ddd11Count,
+          knownPhoneCount,
+          ddd11Pct,
+          announce: !!g.announce,
+          restrict: !!g.restrict,
+        };
+      })
       // Ignora subgrupos fantasmas sem nome e com 0 membros
       .filter((g) => g.subject.length > 0 && g.size > 0);
 
