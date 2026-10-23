@@ -1142,6 +1142,31 @@ app.get(["/", "/qr"], async (req, res) => {
     .panel-sub { font-size: 13px; color: var(--muted); margin-bottom: 18px; }
 
     /* Tabs de Anúncios */
+    .radar-badge {
+      background: var(--green); color: #0b141a; font-size: 11px; font-weight: 800;
+      padding: 2px 7px; border-radius: 999px; margin-left: 4px;
+    }
+    .nav-tab {
+      background: transparent; color: var(--muted); border: none; padding: 8px 14px;
+      border-radius: 9px; font-size: 13.5px; font-weight: 700; cursor: pointer; transition: 0.15s;
+    }
+    .nav-tab:hover { color: #fff; }
+    .nav-tab.active { background: #222e35; color: #fff; }
+    .radar-card {
+      background: var(--card-2); border: 1px solid var(--border); border-radius: 14px;
+      padding: 16px 20px; display: flex; align-items: center; justify-content: space-between;
+      gap: 16px; transition: 0.15s;
+    }
+    .radar-card:hover { border-color: rgba(37, 211, 102, 0.4); background: rgba(255,255,255,0.02); }
+    .radar-name { font-size: 15px; font-weight: 700; color: #fff; margin-bottom: 4px; }
+    .radar-desc { font-size: 12.5px; color: var(--muted); line-height: 1.4; max-width: 600px; }
+    .radar-origin { font-size: 11.5px; color: #38bdf8; margin-top: 6px; }
+    .radar-join-btn {
+      background: var(--green); color: #0b141a; border: none; padding: 10px 18px;
+      border-radius: 10px; font-size: 13px; font-weight: 700; text-decoration: none;
+      white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+    }
+    .radar-join-btn:hover { background: var(--green-dark); }
     .tabs-bar {
       display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; align-items: center;
     }
