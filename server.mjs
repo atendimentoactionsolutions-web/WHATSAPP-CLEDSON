@@ -1611,25 +1611,133 @@ app.get(["/", "/qr"], async (req, res) => {
   </div>
 
   <script>
-    let currentMainView = 'disparo'; // 'disparo' | 'radar'
+    let currentMainView = 'disparo'; // 'disparo' | 'galeria' | 'radar'
     let radarInvitesList = [];
 
     function switchMainView(view) {
       currentMainView = view;
       document.getElementById('tabNavDisparo').className = 'nav-tab' + (view === 'disparo' ? ' active' : '');
+      document.getElementById('tabNavGaleria').className = 'nav-tab' + (view === 'galeria' ? ' active' : '');
       document.getElementById('tabNavRadar').className = 'nav-tab' + (view === 'radar' ? ' active' : '');
       
       const appSec = document.getElementById('appSection');
+      const galeriaSec = document.getElementById('galeriaSection');
       const radarSec = document.getElementById('radarSection');
       
       if (view === 'disparo') {
         appSec.style.display = 'grid';
+        galeriaSec.style.display = 'none';
         radarSec.style.display = 'none';
+        renderTabs();
+        loadCurrentAdIntoEditor();
+      } else if (view === 'galeria') {
+        appSec.style.display = 'none';
+        galeriaSec.style.display = 'block';
+        radarSec.style.display = 'none';
+        renderGalleryGrid();
       } else {
         appSec.style.display = 'none';
+        galeriaSec.style.display = 'none';
         radarSec.style.display = 'block';
         loadRadarInvites();
       }
+    }
+
+    function updateGalleryBadge() {
+      const badge = document.getElementById('galleryBadge');
+      if (badge) {
+        const activeCount = adsList.filter(a => a.enabled).length;
+        badge.innerText = `${activeCount} / ${adsList.length}`;
+        badge.title = `${activeCount} anúncios marcados para disparo de um total de ${adsList.length} salvos`;
+      }
+    }
+
+    function renderGalleryGrid() {
+      const container = document.getElementById('galleryGrid');
+      const q = (document.getElementById('gallerySearch').value || '').toLowerCase().trim();
+      updateGalleryBadge();
+
+      const filtered = adsList.filter(ad => {
+        const n = (ad.name || '').toLowerCase();
+        const c = (ad.caption || '').toLowerCase();
+        return n.includes(q) || c.includes(q);
+      });
+
+      if (adsList.length === 0) {
+        container.innerHTML = `
+          <div style="grid-column: 1 / -1; padding:48px 24px;text-align:center;background:var(--card);border-radius:14px;border:1px dashed var(--border);">
+            <div style="font-size:36px;margin-bottom:10px;">📦</div>
+            <div style="font-size:16px;font-weight:700;color:#fff;margin-bottom:6px;">Nenhum anúncio salvo ainda</div>
+            <p style="font-size:13px;color:var(--muted);margin-bottom:16px;">Crie seu primeiro anúncio para guardar na galeria permanente!</p>
+            <button class="btn" style="background:var(--green);color:#0b141a;font-weight:700;" onclick="createAdInGallery()">+ Criar Anúncio Agora</button>
+          </div>
+        `;
+        return;
+      }
+
+      if (filtered.length === 0) {
+        container.innerHTML = '<div style="grid-column: 1 / -1; padding:30px;text-align:center;color:var(--muted);">Nenhum anúncio encontrado com essa busca.</div>';
+        return;
+      }
+
+      container.innerHTML = filtered.map((ad, idx) => {
+        const realIndex = adsList.findIndex(a => a.id === ad.id);
+        const hasImg = !!ad.imageBase64;
+        const isEnabled = !!ad.enabled;
+
+        return `
+          <div class="gallery-card ${isEnabled ? 'selected-for-campaign' : ''}">
+            <div>
+              ${hasImg 
+                ? `<img src="${ad.imageBase64}" class="gallery-thumb" alt="Foto" />` 
+                : `<div class="gallery-thumb-placeholder">📷 Sem foto anexada</div>`
+              }
+              <div class="gallery-card-title">${ad.name || 'Anúncio sem nome'}</div>
+              <div class="gallery-card-caption">${ad.caption || '<em>(Sem texto/legenda cadastrada)</em>'}</div>
+            </div>
+
+            <div class="gallery-actions">
+              <label class="select-tag" title="Marque para incluir este anúncio na rotação de envio nos grupos">
+                <input type="checkbox" ${isEnabled ? 'checked' : ''} onchange="toggleGalleryAdSelect('${ad.id}')" />
+                <span>${isEnabled ? '✅ Usar no Disparo' : '⏸️ Pausado'}</span>
+              </label>
+              <div style="margin-left:auto;display:flex;gap:6px;">
+                <button class="btn" style="padding:6px 10px;font-size:12px;" onclick="editAdFromGallery(${realIndex})" title="Editar foto e texto">✏️ Editar</button>
+                <button class="btn" style="padding:6px 10px;font-size:12px;background:rgba(239,68,68,0.15);color:#f87171;border-color:rgba(239,68,68,0.3);" onclick="deleteAdFromGallery('${ad.id}')" title="Excluir este anúncio permanentemente">🗑️</button>
+              </div>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function toggleGalleryAdSelect(id) {
+      const ad = adsList.find(a => a.id === id);
+      if (ad) {
+        ad.enabled = !ad.enabled;
+        renderTabs();
+        renderGalleryGrid();
+        debounceSaveAds();
+      }
+    }
+
+    function editAdFromGallery(index) {
+      currentAdIndex = index;
+      switchMainView('disparo');
+    }
+
+    function deleteAdFromGallery(id) {
+      if (!confirm('Tem certeza que deseja apagar este anúncio do seu banco?')) return;
+      adsList = adsList.filter(a => a.id !== id);
+      if (currentAdIndex >= adsList.length) currentAdIndex = Math.max(0, adsList.length - 1);
+      renderTabs();
+      renderGalleryGrid();
+      debounceSaveAds();
+    }
+
+    function createAdInGallery() {
+      addNewAd();
+      switchMainView('disparo');
     }
 
     async function loadRadarInvites() {
