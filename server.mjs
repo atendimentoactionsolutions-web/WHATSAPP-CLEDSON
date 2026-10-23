@@ -1431,6 +1431,7 @@ app.get(["/", "/qr"], async (req, res) => {
       const filtered = allGroups.filter(g => g.subject.toLowerCase().includes(query));
 
       document.getElementById('selectedCounter').innerText = selectedSet.size;
+      document.getElementById('totalActiveCounter').innerText = allGroups.length;
       document.getElementById('btnGroupCount').innerText = selectedSet.size;
 
       if (allGroups.length === 0) {
@@ -1470,6 +1471,18 @@ app.get(["/", "/qr"], async (req, res) => {
       for (const g of filtered) {
         if (select) selectedSet.add(g.id);
         else selectedSet.delete(g.id);
+      }
+      renderGroups();
+      saveSettings();
+    }
+
+    function selectAllGroups(select) {
+      if (select) {
+        for (const g of allGroups) {
+          selectedSet.add(g.id);
+        }
+      } else {
+        selectedSet.clear();
       }
       renderGroups();
       saveSettings();
