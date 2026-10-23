@@ -1565,7 +1565,29 @@ app.get(["/", "/qr"], async (req, res) => {
       </div>
     </div>
 
-    <!-- ABA 2: RADAR DE NOVOS GRUPOS DETECTADOS -->
+    <!-- ABA 2: BANCO DE ANÚNCIOS / GALERIA -->
+    <div id="galeriaSection" class="panel" style="display:none;margin-top:20px;">
+      <div class="panel-title">
+        <span>🖼️ Banco de Anúncios Salvos (Sua Galeria Permanente)</span>
+        <div style="display:flex;gap:8px;">
+          <button class="btn" style="background:var(--green);color:#0b141a;font-weight:700;" onclick="createAdInGallery()">+ Criar Novo Anúncio</button>
+        </div>
+      </div>
+      <p class="panel-sub">
+        Todos os seus anúncios ficam salvos aqui para sempre. Você nunca mais precisa digitar do zero! 
+        Basta <strong>marcar a caixinha "Usar no Disparo"</strong> nos anúncios que quiser enviar hoje.
+      </p>
+
+      <div style="display:flex;gap:10px;margin-bottom:16px;">
+        <input type="text" id="gallerySearch" class="group-search" placeholder="🔍 Buscar no banco por título ou modelo (ex: 17E, 15 Pro, iPad)..." oninput="renderGalleryGrid()" />
+      </div>
+
+      <div class="gallery-grid" id="galleryGrid">
+        <!-- Cards dos Anúncios -->
+      </div>
+    </div>
+
+    <!-- ABA 3: RADAR DE NOVOS GRUPOS DETECTADOS -->
     <div id="radarSection" class="panel" style="display:none;margin-top:20px;">
       <div class="panel-title">
         <span>🎯 Radar de Oportunidades: Grupos Descobertos nas Mensagens</span>
