@@ -718,6 +718,23 @@ app.get("/status", (req, res) => {
   });
 });
 
+// GET /debug-raw-groups
+app.get("/debug-raw-groups", async (req, res) => {
+  if (!waSocket || waStatus !== "CONNECTED") {
+    return res.status(503).json({ error: "WhatsApp não conectado" });
+  }
+  try {
+    const all = await waSocket.groupFetchAllParticipating();
+    const list = Object.values(all || {});
+    res.json({
+      total: list.length,
+      sample: list.slice(0, 10).map((g) => ({ id: g.id, subject: g.subject, size: g.size })),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /groups
 app.get("/groups", async (req, res) => {
   const force = req.query.refresh === "1";
