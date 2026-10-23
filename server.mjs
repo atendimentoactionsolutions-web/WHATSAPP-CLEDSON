@@ -117,9 +117,29 @@ function saveAds() {
   }
 }
 
-// ─── Cache em Memória para Mensagens e Links de Convite Detectados ───
+// ─── Cache em Memória e Persistência de Links de Convite Detectados ───
 const messageStore = new Map();
-const detectedInvites = new Map(); // code -> { code, inviteUrl, foundInGroup, groupName, sender, text, timestamp, groupInfo }
+const RADAR_CACHE_FILE = path.join(DATA_DIR, "radar_invites.json");
+const detectedInvites = new Map(); // code -> { code, inviteUrl, foundInGroup, groupName, sender, text, timestamp, groupMeta }
+
+try {
+  if (fs.existsSync(RADAR_CACHE_FILE)) {
+    const rawInvites = JSON.parse(fs.readFileSync(RADAR_CACHE_FILE, "utf-8"));
+    if (Array.isArray(rawInvites)) {
+      for (const item of rawInvites) {
+        if (item && item.code) detectedInvites.set(item.code, item);
+      }
+    }
+  }
+} catch (e) {
+  console.error("Erro ao carregar radar_invites.json:", e);
+}
+
+function saveRadarInvites() {
+  try {
+    fs.writeFileSync(RADAR_CACHE_FILE, JSON.stringify(Array.from(detectedInvites.values()), null, 2));
+  } catch (e) {}
+}
 
 function saveMessageToStore(msg) {
   if (!msg || !msg.key || !msg.key.id) return;
@@ -133,18 +153,22 @@ function saveMessageToStore(msg) {
 
   // Extrair texto da mensagem para caçar links de convite (chat.whatsapp.com)
   try {
+    const m = msg.message;
     const text =
-      msg.message?.conversation ||
-      msg.message?.extendedTextMessage?.text ||
-      msg.message?.imageMessage?.caption ||
-      msg.message?.videoMessage?.caption ||
+      m?.conversation ||
+      m?.extendedTextMessage?.text ||
+      m?.imageMessage?.caption ||
+      m?.videoMessage?.caption ||
+      m?.documentMessage?.caption ||
+      m?.templateButtonReplyMessage?.selectedId ||
       "";
 
     if (text && text.includes("chat.whatsapp.com")) {
       const matches = text.match(/chat\.whatsapp\.com\/([A-Za-z0-9_-]{20,26})/g);
       if (matches) {
-        for (const m of matches) {
-          const code = m.split("/").pop();
+        let hasNew = false;
+        for (const mStr of matches) {
+          const code = mStr.split("/").pop();
           if (code && !detectedInvites.has(code)) {
             const remoteJid = msg.key.remoteJid || "";
             const groupName = cachedGroups.find((g) => g.id === remoteJid)?.subject || remoteJid;
@@ -154,11 +178,14 @@ function saveMessageToStore(msg) {
               foundInGroup: remoteJid,
               groupName,
               sender: msg.key.participant || msg.key.remoteJid,
-              snippet: text.slice(0, 200),
+              snippet: text.slice(0, 300),
               timestamp: msg.messageTimestamp ? msg.messageTimestamp * 1000 : Date.now(),
             });
+            hasNew = true;
+            console.log(`🎯 [RADAR] Novo link de convite detectado: https://chat.whatsapp.com/${code} (origem: ${groupName})`);
           }
         }
+        if (hasNew) saveRadarInvites();
       }
     }
   } catch (e) {}
