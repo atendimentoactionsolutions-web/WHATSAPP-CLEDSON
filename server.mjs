@@ -1873,7 +1873,15 @@ app.get(["/", "/qr"], async (req, res) => {
           pill.innerHTML = '🟢 Conectado: +' + (data.user || '');
           sub.innerText = (data.name || 'Cledson') + ' • Sessão Ativa na VPS';
           qrSec.style.display = 'none';
-          appSec.style.display = 'grid';
+          
+          // Respeita a aba atual que o usuário está navegando (não fecha o radar!)
+          if (currentMainView === 'disparo') {
+            appSec.style.display = 'grid';
+            document.getElementById('radarSection').style.display = 'none';
+          } else {
+            appSec.style.display = 'none';
+            document.getElementById('radarSection').style.display = 'block';
+          }
 
           if (adsList.length === 0 && Array.isArray(data.ads)) {
             adsList = data.ads;
