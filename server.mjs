@@ -1836,23 +1836,19 @@ app.get(["/", "/qr"], async (req, res) => {
     // Gerenciamento de Anúncios e Abas (Mostra apenas os selecionados para disparo)
     function renderTabs() {
       const bar = document.getElementById('tabsBar');
-      const editorCard = document.getElementById('adEditorCard');
+      const contentDiv = document.getElementById('adEditorContent');
+      const emptyDiv = document.getElementById('adEditorEmpty');
       const activeAds = adsList.filter(a => a.enabled);
 
       if (activeAds.length === 0) {
-        bar.innerHTML = '<span style="font-size:13px;color:var(--warn);">⚠️ Nenhum anúncio selecionado para disparo.</span>';
-        if (editorCard) {
-          editorCard.innerHTML = `
-            <div style="padding:32px 16px;text-align:center;">
-              <div style="font-size:32px;margin-bottom:8px;">🖼️</div>
-              <div style="font-size:15px;font-weight:700;color:#fff;margin-bottom:6px;">Nenhum Anúncio Selecionado no Banco</div>
-              <p style="font-size:13px;color:var(--muted);margin-bottom:16px;">Vá até a aba <strong>Banco de Anúncios</strong> e marque a caixinha "Usar no Disparo" nos produtos que deseja disparar hoje.</p>
-              <button class="btn" style="background:var(--green);color:#0b141a;font-weight:700;" onclick="switchMainView('galeria')">Ir para o Banco de Anúncios</button>
-            </div>
-          `;
-        }
+        bar.innerHTML = '<span style="font-size:13px;color:var(--warn);font-weight:600;">⚠️ Nenhum anúncio selecionado para disparo.</span>';
+        if (contentDiv) contentDiv.style.display = 'none';
+        if (emptyDiv) emptyDiv.style.display = 'block';
         return;
       }
+
+      if (contentDiv) contentDiv.style.display = 'block';
+      if (emptyDiv) emptyDiv.style.display = 'none';
 
       // Se o anúncio atual não estiver mais entre os ativos, aponta para o primeiro ativo
       const curAd = adsList[currentAdIndex];
