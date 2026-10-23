@@ -1825,27 +1825,54 @@ app.get(["/", "/qr"], async (req, res) => {
     let selectedSet = new Set();
     let groupsLoadedOnce = false;
 
-    // Gerenciamento de Anúncios e Abas
+    // Gerenciamento de Anúncios e Abas (Mostra apenas os selecionados para disparo)
     function renderTabs() {
       const bar = document.getElementById('tabsBar');
-      bar.innerHTML = adsList.map((ad, idx) => {
-        const isActive = idx === currentAdIndex;
+      const editorCard = document.getElementById('adEditorCard');
+      const activeAds = adsList.filter(a => a.enabled);
+
+      if (activeAds.length === 0) {
+        bar.innerHTML = '<span style="font-size:13px;color:var(--warn);">⚠️ Nenhum anúncio selecionado para disparo.</span>';
+        if (editorCard) {
+          editorCard.innerHTML = `
+            <div style="padding:32px 16px;text-align:center;">
+              <div style="font-size:32px;margin-bottom:8px;">🖼️</div>
+              <div style="font-size:15px;font-weight:700;color:#fff;margin-bottom:6px;">Nenhum Anúncio Selecionado no Banco</div>
+              <p style="font-size:13px;color:var(--muted);margin-bottom:16px;">Vá até a aba <strong>Banco de Anúncios</strong> e marque a caixinha "Usar no Disparo" nos produtos que deseja disparar hoje.</p>
+              <button class="btn" style="background:var(--green);color:#0b141a;font-weight:700;" onclick="switchMainView('galeria')">Ir para o Banco de Anúncios</button>
+            </div>
+          `;
+        }
+        return;
+      }
+
+      // Se o anúncio atual não estiver mais entre os ativos, aponta para o primeiro ativo
+      const curAd = adsList[currentAdIndex];
+      if (!curAd || !curAd.enabled) {
+        const firstActiveIdx = adsList.findIndex(a => a.enabled);
+        if (firstActiveIdx !== -1) currentAdIndex = firstActiveIdx;
+      }
+
+      bar.innerHTML = activeAds.map(ad => {
+        const realIdx = adsList.findIndex(a => a.id === ad.id);
+        const isActive = realIdx === currentAdIndex;
         const hasContent = !!(ad.caption?.trim() || ad.imageBase64);
         return \`
-          <button class="tab-btn \${isActive ? 'active' : ''} \${hasContent ? 'has-content' : ''}" onclick="switchTab(\${idx})">
+          <button class="tab-btn \${isActive ? 'active' : ''} \${hasContent ? 'has-content' : ''}" onclick="switchTab(\${realIdx})">
             <span class="tab-dot"></span>
-            \${ad.name || ('Anúncio ' + (idx + 1))} \${!ad.enabled ? '(Pausado)' : ''}
+            \${ad.name || 'Anúncio'}
           </button>
         \`;
       }).join('') + \`
-        <button class="btn" onclick="addNewAd()" title="Adicionar mais um anúncio">+ Novo Anúncio</button>
+        <button class="btn" onclick="switchMainView('galeria')" title="Gerenciar todos os anúncios no banco">🖼️ Gerenciar no Banco</button>
       \`;
+
+      loadCurrentAdIntoEditor();
     }
 
     function switchTab(index) {
       currentAdIndex = index;
       renderTabs();
-      loadCurrentAdIntoEditor();
     }
 
     function loadCurrentAdIntoEditor() {
