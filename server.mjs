@@ -230,38 +230,56 @@ function parseImageData(dataUrl) {
   }
 }
 
-// Buscar todos os grupos em que o número conectado participa
+// Converte objeto de grupo do Baileys para o formato padrão do sistema (com filtros anti-fantasma rigorosos)
+function formatGroupObject(g) {
+  if (!g || !g.id || !g.id.endsWith("@g.us")) return null;
+
+  const subject = (g.subject || "").trim();
+  // Regra 1: Nome obrigatório e não pode ser genérico "Grupo sem nome"
+  if (!subject || subject.toLowerCase() === "grupo sem nome") return null;
+
+  const parts = Array.isArray(g.participants) ? g.participants : [];
+  const size = parts.length || g.size || 0;
+  // Regra 2: Deve ter pelo menos 2 membros reais (evita subgrupos vazios/fantasmas de comunidade)
+  if (size < 2) return null;
+
+  let ddd11Count = 0;
+  let knownPhoneCount = 0;
+  for (const p of parts) {
+    const jidStr = p.phoneNumber || p.jid || p.id || "";
+    const num = jidStr.split("@")[0].split(":")[0].replace(/\D/g, "");
+    if (num.startsWith("55") && num.length >= 12) {
+      knownPhoneCount++;
+      if (num.slice(2, 4) === "11") ddd11Count++;
+    }
+  }
+  const ddd11Pct = knownPhoneCount > 0 ? Math.round((ddd11Count / knownPhoneCount) * 100) : null;
+
+  return {
+    id: g.id,
+    subject,
+    size,
+    ddd11Count,
+    knownPhoneCount,
+    ddd11Pct,
+    announce: !!g.announce,
+    restrict: !!g.restrict,
+  };
+}
+
+// Buscar todos os grupos em que o número conectado participa (filtrado e sem fantasmas)
 async function refreshGroups() {
   if (!waSocket || waStatus !== "CONNECTED") return cachedGroups;
   try {
     const all = await waSocket.groupFetchAllParticipating();
-    const list = Object.values(all || {})
-      .map((g) => {
-        const parts = Array.isArray(g.participants) ? g.participants : [];
-        const size = parts.length || g.size || 0;
-        let ddd11Count = 0;
-        let knownPhoneCount = 0;
-        for (const p of parts) {
-          const jidStr = p.phoneNumber || p.jid || p.id || "";
-          const num = jidStr.split("@")[0].split(":")[0].replace(/\D/g, "");
-          if (num.startsWith("55") && num.length >= 12) {
-            knownPhoneCount++;
-            if (num.slice(2, 4) === "11") ddd11Count++;
-          }
-        }
-        const ddd11Pct = knownPhoneCount > 0 ? Math.round((ddd11Count / knownPhoneCount) * 100) : null;
-        return {
-          id: g.id,
-          subject: (g.subject || "Grupo sem nome").trim(),
-          size,
-          ddd11Count,
-          knownPhoneCount,
-          ddd11Pct,
-          announce: !!g.announce,
-          restrict: !!g.restrict,
-        };
-      });
+    const map = new Map();
 
+    for (const g of Object.values(all || {})) {
+      const formatted = formatGroupObject(g);
+      if (formatted) map.set(formatted.id, formatted);
+    }
+
+    const list = Array.from(map.values());
     list.sort((a, b) => a.subject.localeCompare(b.subject, "pt-BR"));
     cachedGroups = list;
     return cachedGroups;
