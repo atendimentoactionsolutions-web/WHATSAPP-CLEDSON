@@ -1291,6 +1291,12 @@ app.get(["/", "/qr"], async (req, res) => {
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;">
+        <div id="mainNav" style="display:flex;background:var(--card-2);border:1px solid var(--border);border-radius:12px;padding:4px;">
+          <button class="nav-tab active" id="tabNavDisparo" onclick="switchMainView('disparo')">📢 Disparador</button>
+          <button class="nav-tab" id="tabNavRadar" onclick="switchMainView('radar')">
+            🎯 Radar de Novos Grupos <span id="radarBadge" class="radar-badge" style="display:none;">0</span>
+          </button>
+        </div>
         <div id="statusPill" class="status-pill wait">⏳ Conectando...</div>
         <button class="btn" onclick="resetSession()">Trocar Número</button>
       </div>
