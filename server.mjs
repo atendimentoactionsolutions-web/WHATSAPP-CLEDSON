@@ -1664,14 +1664,14 @@ app.get(["/", "/qr"], async (req, res) => {
       });
 
       if (adsList.length === 0) {
-        container.innerHTML = `
+        container.innerHTML = \`
           <div style="grid-column: 1 / -1; padding:48px 24px;text-align:center;background:var(--card);border-radius:14px;border:1px dashed var(--border);">
             <div style="font-size:36px;margin-bottom:10px;">📦</div>
             <div style="font-size:16px;font-weight:700;color:#fff;margin-bottom:6px;">Nenhum anúncio salvo ainda</div>
             <p style="font-size:13px;color:var(--muted);margin-bottom:16px;">Crie seu primeiro anúncio para guardar na galeria permanente!</p>
             <button class="btn" style="background:var(--green);color:#0b141a;font-weight:700;" onclick="createAdInGallery()">+ Criar Anúncio Agora</button>
           </div>
-        `;
+        \`;
         return;
       }
 
@@ -1685,29 +1685,29 @@ app.get(["/", "/qr"], async (req, res) => {
         const hasImg = !!ad.imageBase64;
         const isEnabled = !!ad.enabled;
 
-        return `
-          <div class="gallery-card ${isEnabled ? 'selected-for-campaign' : ''}">
+        return \`
+          <div class="gallery-card \${isEnabled ? 'selected-for-campaign' : ''}">
             <div>
-              ${hasImg 
-                ? `<img src="${ad.imageBase64}" class="gallery-thumb" alt="Foto" />` 
-                : `<div class="gallery-thumb-placeholder">📷 Sem foto anexada</div>`
+              \${hasImg 
+                ? \`<img src="\${ad.imageBase64}" class="gallery-thumb" alt="Foto" />\` 
+                : \`<div class="gallery-thumb-placeholder">📷 Sem foto anexada</div>\`
               }
-              <div class="gallery-card-title">${ad.name || 'Anúncio sem nome'}</div>
-              <div class="gallery-card-caption">${ad.caption || '<em>(Sem texto/legenda cadastrada)</em>'}</div>
+              <div class="gallery-card-title">\${ad.name || 'Anúncio sem nome'}</div>
+              <div class="gallery-card-caption">\${ad.caption || '<em>(Sem texto/legenda cadastrada)</em>'}</div>
             </div>
 
             <div class="gallery-actions">
               <label class="select-tag" title="Marque para incluir este anúncio na rotação de envio nos grupos">
-                <input type="checkbox" ${isEnabled ? 'checked' : ''} onchange="toggleGalleryAdSelect('${ad.id}')" />
-                <span>${isEnabled ? '✅ Usar no Disparo' : '⏸️ Pausado'}</span>
+                <input type="checkbox" \${isEnabled ? 'checked' : ''} onchange="toggleGalleryAdSelect('\${ad.id}')" />
+                <span>\${isEnabled ? '✅ Usar no Disparo' : '⏸️ Pausado'}</span>
               </label>
               <div style="margin-left:auto;display:flex;gap:6px;">
-                <button class="btn" style="padding:6px 10px;font-size:12px;" onclick="editAdFromGallery(${realIndex})" title="Editar foto e texto">✏️ Editar</button>
-                <button class="btn" style="padding:6px 10px;font-size:12px;background:rgba(239,68,68,0.15);color:#f87171;border-color:rgba(239,68,68,0.3);" onclick="deleteAdFromGallery('${ad.id}')" title="Excluir este anúncio permanentemente">🗑️</button>
+                <button class="btn" style="padding:6px 10px;font-size:12px;" onclick="editAdFromGallery(\${realIndex})" title="Editar foto e texto">✏️ Editar</button>
+                <button class="btn" style="padding:6px 10px;font-size:12px;background:rgba(239,68,68,0.15);color:#f87171;border-color:rgba(239,68,68,0.3);" onclick="deleteAdFromGallery('\${ad.id}')" title="Excluir este anúncio permanentemente">🗑️</button>
               </div>
             </div>
           </div>
-        `;
+        \`;
       }).join('');
     }
 
