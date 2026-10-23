@@ -2117,12 +2117,18 @@ app.get(["/", "/qr"], async (req, res) => {
           sub.innerText = (data.name || 'Cledson') + ' • Sessão Ativa na VPS';
           qrSec.style.display = 'none';
           
-          // Respeita a aba atual que o usuário está navegando (não fecha o radar!)
+          // Respeita a aba atual que o usuário está navegando (Disparador, Banco de Anúncios ou Radar)
           if (currentMainView === 'disparo') {
             appSec.style.display = 'grid';
+            document.getElementById('galeriaSection').style.display = 'none';
+            document.getElementById('radarSection').style.display = 'none';
+          } else if (currentMainView === 'galeria') {
+            appSec.style.display = 'none';
+            document.getElementById('galeriaSection').style.display = 'block';
             document.getElementById('radarSection').style.display = 'none';
           } else {
             appSec.style.display = 'none';
+            document.getElementById('galeriaSection').style.display = 'none';
             document.getElementById('radarSection').style.display = 'block';
           }
 
@@ -2130,6 +2136,7 @@ app.get(["/", "/qr"], async (req, res) => {
             adsList = data.ads;
             renderTabs();
             loadCurrentAdIntoEditor();
+            updateGalleryBadge();
           }
           if (data.config?.rotationMode) {
             document.getElementById('rotationModeSelect').value = data.config.rotationMode;
