@@ -117,8 +117,9 @@ function saveAds() {
   }
 }
 
-// ─── Cache em Memória para Retry Receipts ───
+// ─── Cache em Memória para Mensagens e Links de Convite Detectados ───
 const messageStore = new Map();
+const detectedInvites = new Map(); // code -> { code, inviteUrl, foundInGroup, groupName, sender, text, timestamp, groupInfo }
 
 function saveMessageToStore(msg) {
   if (!msg || !msg.key || !msg.key.id) return;
@@ -129,6 +130,38 @@ function saveMessageToStore(msg) {
     const firstKey = messageStore.keys().next().value;
     if (firstKey) messageStore.delete(firstKey);
   }
+
+  // Extrair texto da mensagem para caçar links de convite (chat.whatsapp.com)
+  try {
+    const text =
+      msg.message?.conversation ||
+      msg.message?.extendedTextMessage?.text ||
+      msg.message?.imageMessage?.caption ||
+      msg.message?.videoMessage?.caption ||
+      "";
+
+    if (text && text.includes("chat.whatsapp.com")) {
+      const matches = text.match(/chat\.whatsapp\.com\/([A-Za-z0-9_-]{20,26})/g);
+      if (matches) {
+        for (const m of matches) {
+          const code = m.split("/").pop();
+          if (code && !detectedInvites.has(code)) {
+            const remoteJid = msg.key.remoteJid || "";
+            const groupName = cachedGroups.find((g) => g.id === remoteJid)?.subject || remoteJid;
+            detectedInvites.set(code, {
+              code,
+              url: `https://chat.whatsapp.com/${code}`,
+              foundInGroup: remoteJid,
+              groupName,
+              sender: msg.key.participant || msg.key.remoteJid,
+              snippet: text.slice(0, 200),
+              timestamp: msg.messageTimestamp ? msg.messageTimestamp * 1000 : Date.now(),
+            });
+          }
+        }
+      }
+    }
+  } catch (e) {}
 }
 
 class SimpleNodeCache {
