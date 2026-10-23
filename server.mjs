@@ -1451,9 +1451,126 @@ app.get(["/", "/qr"], async (req, res) => {
         </div>
       </div>
     </div>
+
+    <!-- ABA 2: RADAR DE NOVOS GRUPOS DETECTADOS -->
+    <div id="radarSection" class="panel" style="display:none;margin-top:20px;">
+      <div class="panel-title">
+        <span>🎯 Radar de Oportunidades: Grupos Descobertos nas Mensagens</span>
+        <button class="btn" onclick="loadRadarInvites()">🔄 Recarregar Radar</button>
+      </div>
+      <p class="panel-sub">
+        Convites de novos grupos postados dentro dos seus 374 grupos atuais. 
+        O robô <strong>NUNCA entra sozinho</strong>. Se achar algum grupo interessante para suas vendas, basta clicar em <strong>"Entrar pelo WhatsApp"</strong> para entrar com o seu celular.
+      </p>
+
+      <div style="display:flex;gap:10px;margin-bottom:16px;">
+        <input type="text" id="radarSearch" class="group-search" placeholder="🔍 Filtrar por nome (ex: rolo, desapego, zona leste)..." oninput="renderRadarList()" />
+      </div>
+
+      <div id="radarList" style="display:flex;flex-direction:column;gap:12px;">
+        <div style="padding:40px;text-align:center;color:var(--muted);">
+          Monitorando mensagens recebidas... Novos convites aparecerão aqui automaticamente!
+        </div>
+      </div>
+    </div>
   </div>
 
   <script>
+    let currentMainView = 'disparo'; // 'disparo' | 'radar'
+    let radarInvitesList = [];
+
+    function switchMainView(view) {
+      currentMainView = view;
+      document.getElementById('tabNavDisparo').className = 'nav-tab' + (view === 'disparo' ? ' active' : '');
+      document.getElementById('tabNavRadar').className = 'nav-tab' + (view === 'radar' ? ' active' : '');
+      
+      const appSec = document.getElementById('appSection');
+      const radarSec = document.getElementById('radarSection');
+      
+      if (view === 'disparo') {
+        appSec.style.display = 'grid';
+        radarSec.style.display = 'none';
+      } else {
+        appSec.style.display = 'none';
+        radarSec.style.display = 'block';
+        loadRadarInvites();
+      }
+    }
+
+    async function loadRadarInvites() {
+      const container = document.getElementById('radarList');
+      container.innerHTML = '<div style="padding:40px;text-align:center;color:var(--muted);">Buscando novos grupos no radar...</div>';
+      try {
+        const res = await fetch('/invites');
+        const data = await res.json();
+        radarInvitesList = data.invites || [];
+        
+        const badge = document.getElementById('radarBadge');
+        if (radarInvitesList.length > 0) {
+          badge.style.display = 'inline-block';
+          badge.innerText = radarInvitesList.length;
+        } else {
+          badge.style.display = 'none';
+        }
+        
+        renderRadarList();
+      } catch (e) {
+        container.innerHTML = '<div style="padding:40px;text-align:center;color:var(--danger);">Erro ao carregar convites do radar.</div>';
+      }
+    }
+
+    function renderRadarList() {
+      const container = document.getElementById('radarList');
+      const q = (document.getElementById('radarSearch').value || '').toLowerCase().trim();
+      
+      const filtered = radarInvitesList.filter(inv => {
+        const name = (inv.groupMeta?.subject || inv.code || '').toLowerCase();
+        const desc = (inv.groupMeta?.desc || '').toLowerCase();
+        const origin = (inv.groupName || '').toLowerCase();
+        return name.includes(q) || desc.includes(q) || origin.includes(q);
+      });
+
+      if (radarInvitesList.length === 0) {
+        container.innerHTML = \`
+          <div style="padding:48px 24px;text-align:center;background:var(--card);border-radius:14px;border:1px dashed var(--border);">
+            <div style="font-size:36px;margin-bottom:10px;">📡</div>
+            <div style="font-size:15px;font-weight:700;color:#fff;margin-bottom:6px;">Radar Monitorando Ativamente</div>
+            <div style="font-size:13px;color:var(--muted);max-width:500px;margin:0 auto;line-height:1.5;">
+              Assim que qualquer membro divulgar links de convite de grupos de desapego, vendas ou trocas dentro dos seus 374 grupos atuais, eles aparecerão aqui com botão de entrada para você analisar!
+            </div>
+          </div>
+        \`;
+        return;
+      }
+
+      if (filtered.length === 0) {
+        container.innerHTML = '<div style="padding:30px;text-align:center;color:var(--muted);">Nenhum grupo encontrado com esse filtro.</div>';
+        return;
+      }
+
+      container.innerHTML = filtered.map(inv => {
+        const title = inv.groupMeta?.subject || 'Grupo de WhatsApp (' + inv.code + ')';
+        const size = inv.groupMeta?.size ? inv.groupMeta.size + ' membros' : 'Membros não informados';
+        const desc = inv.groupMeta?.desc ? inv.groupMeta.desc.replace(/\\n/g, '<br/>') : 'Sem descrição informada.';
+        const origin = inv.groupName ? 'Encontrado no grupo: "' + inv.groupName + '"' : '';
+
+        return \`
+          <div class="radar-card">
+            <div style="flex:1;min-width:0;">
+              <div class="radar-name">\${title} <span style="font-size:12px;color:var(--green);font-weight:600;margin-left:8px;">👥 \${size}</span></div>
+              <div class="radar-desc">\${desc.slice(0, 180)}</div>
+              \${origin ? '<div class="radar-origin">📍 ' + origin + '</div>' : ''}
+            </div>
+            <div>
+              <a href="\${inv.url}" target="_blank" rel="noopener noreferrer" class="radar-join-btn">
+                🔗 Entrar pelo WhatsApp
+              </a>
+            </div>
+          </div>
+        \`;
+      }).join('');
+    }
+
     let adsList = [];
     let currentAdIndex = 0;
     let allGroups = [];
