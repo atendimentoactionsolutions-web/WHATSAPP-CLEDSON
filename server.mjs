@@ -1450,10 +1450,10 @@ app.get(["/", "/qr"], async (req, res) => {
       <!-- Coluna Esquerda: Anúncios Mesclados -->
       <div class="panel">
         <div class="panel-title">
-          <span>1. Seus Anúncios Mesclados (Anti-Ban)</span>
-          <span style="font-size:12px;color:var(--green);">🛡️ Rotação Ativa</span>
+          <span>1. Anúncios Ativos para Disparo</span>
+          <a href="javascript:void(0)" onclick="switchMainView('galeria')" style="font-size:12.5px;color:#38bdf8;text-decoration:none;font-weight:600;">🖼️ Abrir Banco de Anúncios</a>
         </div>
-        <p class="panel-sub">Cadastre seus 3 anúncios abaixo. A cada grupo, o sistema alterna o anúncio enviado para o WhatsApp nunca ver conteúdo repetido!</p>
+        <p class="panel-sub">Exibindo apenas os anúncios que você marcou como <strong>"Usar no Disparo"</strong> na sua Galeria. A cada grupo, o sistema alterna entre eles!</p>
 
         <!-- Abas dos Anúncios -->
         <div class="tabs-bar" id="tabsBar"></div>
