@@ -252,7 +252,7 @@ async function refreshGroups() {
         const ddd11Pct = knownPhoneCount > 0 ? Math.round((ddd11Count / knownPhoneCount) * 100) : null;
         return {
           id: g.id,
-          subject: (g.subject || "").trim(),
+          subject: (g.subject || "Grupo sem nome").trim(),
           size,
           ddd11Count,
           knownPhoneCount,
@@ -260,8 +260,7 @@ async function refreshGroups() {
           announce: !!g.announce,
           restrict: !!g.restrict,
         };
-      })
-      .filter((g) => g.subject.length > 0 && g.size > 0);
+      });
 
     list.sort((a, b) => a.subject.localeCompare(b.subject, "pt-BR"));
     cachedGroups = list;
