@@ -586,6 +586,61 @@ app.get("/groups", async (req, res) => {
   });
 });
 
+// POST /groups/leave — sai e apaga uma lista de grupos (groupIds)
+app.post("/groups/leave", async (req, res) => {
+  const { groupIds } = req.body;
+  if (!Array.isArray(groupIds) || groupIds.length === 0) {
+    return res.status(400).json({ success: false, error: "groupIds deve ser uma lista de JIDs" });
+  }
+  if (!waSocket || waStatus !== "CONNECTED") {
+    return res.status(503).json({ success: false, error: "WhatsApp não conectado" });
+  }
+
+  const results = [];
+  for (const jid of groupIds) {
+    const groupObj = cachedGroups.find((g) => g.id === jid);
+    const groupName = groupObj ? groupObj.subject : jid;
+    let leftOk = false;
+    let deletedOk = false;
+    let errorMsg = null;
+
+    try {
+      await waSocket.groupLeave(jid);
+      leftOk = true;
+      console.log(`🚪 Saiu do grupo: ${groupName} (${jid})`);
+    } catch (err) {
+      errorMsg = err.message;
+      console.warn(`⚠️ Aviso ao sair do grupo ${groupName} (${jid}):`, err.message);
+    }
+
+    await delay(800);
+
+    try {
+      await waSocket.chatModify(
+        {
+          delete: true,
+          lastMessages: [{ key: { remoteJid: jid, fromMe: true, id: "1" }, messageTimestamp: Math.floor(Date.now() / 1000) }],
+        },
+        jid
+      );
+      deletedOk = true;
+    } catch (delErr) {
+      // Mesmo se o chatModify falhar por falta de mensagem local no cache, o groupLeave já removeu do grupo
+    }
+
+    // Remove da memória e dos selecionados
+    cachedGroups = cachedGroups.filter((g) => g.id !== jid);
+    appConfig.selectedGroups = (appConfig.selectedGroups || []).filter((id) => id !== jid);
+
+    results.push({ jid, name: groupName, leftOk, deletedOk, error: errorMsg });
+    await delay(1000);
+  }
+
+  saveConfig();
+  await refreshGroups().catch(() => {});
+  res.json({ success: true, results, remainingGroups: cachedGroups.length });
+});
+
 // POST /config — salva grupos selecionados e parâmetros de delay anti-ban
 app.post("/config", (req, res) => {
   const { selectedGroups, minDelaySec, maxDelaySec, shuffleGroups, simulateTyping, lastCaption } = req.body;
