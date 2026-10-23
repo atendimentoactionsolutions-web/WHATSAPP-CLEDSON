@@ -1313,6 +1313,89 @@ app.get(["/", "/qr"], async (req, res) => {
     }
     .group-meta { font-size: 12px; color: var(--muted); white-space: nowrap; }
 
+    /* Estilos do Banco de Anúncios / Galeria */
+    .gallery-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 16px;
+      margin-top: 16px;
+    }
+    .gallery-card {
+      background: var(--card-2);
+      border: 2px solid var(--border);
+      border-radius: 14px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      transition: 0.2s;
+      position: relative;
+    }
+    .gallery-card:hover { border-color: rgba(37, 211, 102, 0.4); }
+    .gallery-card.selected-for-campaign {
+      border-color: var(--green);
+      background: rgba(37, 211, 102, 0.05);
+    }
+    .gallery-thumb {
+      width: 100%;
+      height: 160px;
+      object-fit: cover;
+      border-radius: 10px;
+      background: var(--card);
+      margin-bottom: 12px;
+      display: block;
+    }
+    .gallery-thumb-placeholder {
+      width: 100%;
+      height: 140px;
+      border-radius: 10px;
+      background: var(--card);
+      border: 1px dashed var(--border);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 12px;
+    }
+    .gallery-card-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: #fff;
+      margin-bottom: 6px;
+    }
+    .gallery-card-caption {
+      font-size: 12.5px;
+      color: var(--muted);
+      line-height: 1.45;
+      max-height: 80px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-bottom: 12px;
+      white-space: pre-wrap;
+    }
+    .gallery-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-top: auto;
+    }
+    .select-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12.5px;
+      font-weight: 700;
+      cursor: pointer;
+      color: #d1d7db;
+    }
+    .select-tag input {
+      width: 18px;
+      height: 18px;
+      accent-color: var(--green);
+    }
+
     .progress-card {
       margin-top: 18px; background: var(--card-2); border: 1px solid var(--border);
       border-radius: 12px; padding: 16px;
@@ -1345,6 +1428,9 @@ app.get(["/", "/qr"], async (req, res) => {
       <div style="display:flex;align-items:center;gap:10px;">
         <div id="mainNav" style="display:flex;background:var(--card-2);border:1px solid var(--border);border-radius:12px;padding:4px;">
           <button class="nav-tab active" id="tabNavDisparo" onclick="switchMainView('disparo')">📢 Disparador</button>
+          <button class="nav-tab" id="tabNavGaleria" onclick="switchMainView('galeria')">
+            🖼️ Banco de Anúncios <span id="galleryBadge" class="radar-badge" style="background:#38bdf8;color:#0b141a;">0</span>
+          </button>
           <button class="nav-tab" id="tabNavRadar" onclick="switchMainView('radar')">
             🎯 Radar de Novos Grupos <span id="radarBadge" class="radar-badge" style="display:none;">0</span>
           </button>
