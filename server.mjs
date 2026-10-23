@@ -17,6 +17,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SESSION_DIR = path.join(__dirname, ".wa-session");
 const DATA_DIR = path.join(__dirname, "data");
 const CONFIG_FILE = path.join(DATA_DIR, "config.json");
+const ADS_FILE = path.join(DATA_DIR, "ads.json");
 const PORT = process.env.PORT || 3010;
 const API_SECRET = process.env.WA_API_SECRET || "cledson2026";
 
@@ -26,14 +27,23 @@ if (!fs.existsSync(DATA_DIR)) {
 
 const logger = pino({ level: "silent" });
 
-// ─── Persistência de Configuração (Grupos Selecionados, Intervalos, Histórico) ───
+// ─── Persistência de Configuração e Anúncios Múltiplos ───
 const defaultConfig = {
-  selectedGroups: [], // array de JIDs dos grupos selecionados para vendas
+  selectedGroups: [],
   minDelaySec: 15,
   maxDelaySec: 30,
   shuffleGroups: true,
   simulateTyping: true,
-  lastCaption: `📱 iPhone 17E 256GB
+  rotationMode: "round_robin", // "round_robin" (alterna 1, 2, 3...) ou "random" (sorteia)
+  history: [],
+};
+
+const defaultAds = [
+  {
+    id: "ad_1",
+    name: "Anúncio 1 - iPhone 17E",
+    enabled: true,
+    caption: `📱 iPhone 17E 256GB
 
 Valor: R$ 4.250,00
 
@@ -46,8 +56,23 @@ Valor: R$ 4.250,00
 📍 Loja física
 
 Aceitamos seu iPhone usado como parte do pagamento mediante avaliação.`,
-  history: [], // últimos disparos realizados
-};
+    imageBase64: null,
+  },
+  {
+    id: "ad_2",
+    name: "Anúncio 2",
+    enabled: true,
+    caption: "",
+    imageBase64: null,
+  },
+  {
+    id: "ad_3",
+    name: "Anúncio 3",
+    enabled: true,
+    caption: "",
+    imageBase64: null,
+  },
+];
 
 function loadConfig() {
   try {
@@ -61,13 +86,34 @@ function loadConfig() {
   return { ...defaultConfig };
 }
 
+function loadAds() {
+  try {
+    if (fs.existsSync(ADS_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(ADS_FILE, "utf-8"));
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch (e) {
+    console.error("Erro ao carregar ads.json:", e);
+  }
+  return JSON.parse(JSON.stringify(defaultAds));
+}
+
 let appConfig = loadConfig();
+let appAds = loadAds();
 
 function saveConfig() {
   try {
     fs.writeFileSync(CONFIG_FILE, JSON.stringify(appConfig, null, 2));
   } catch (e) {
     console.error("Erro ao salvar config.json:", e);
+  }
+}
+
+function saveAds() {
+  try {
+    fs.writeFileSync(ADS_FILE, JSON.stringify(appAds, null, 2));
+  } catch (e) {
+    console.error("Erro ao salvar ads.json:", e);
   }
 }
 
@@ -89,9 +135,7 @@ class SimpleNodeCache {
   constructor() {
     this.map = new Map();
   }
-  get(k) {
-    return this.map.get(k);
-  }
+  get(k) { return this.map.get(k); }
   set(k, v) {
     this.map.set(k, v);
     if (this.map.size > 5000) {
@@ -100,13 +144,8 @@ class SimpleNodeCache {
     }
     return true;
   }
-  del(k) {
-    this.map.delete(k);
-    return 1;
-  }
-  flushAll() {
-    this.map.clear();
-  }
+  del(k) { this.map.delete(k); return 1; }
+  flushAll() { this.map.clear(); }
 }
 
 const msgRetryCounterCache = new SimpleNodeCache();
@@ -119,9 +158,9 @@ let waQrRaw = null;
 let waUser = null;
 let waName = null;
 let waInitPromise = null;
-let cachedGroups = []; // [{ id, subject, size, announce, restrict }]
+let cachedGroups = [];
 
-// ─── Estado do Disparador Anti-Ban (Fila Humana) ────────────────────────────
+// ─── Estado do Disparador Anti-Ban (Fila Humana com Rotação) ────────────────
 let campaignState = {
   isRunning: false,
   shouldStop: false,
@@ -132,22 +171,22 @@ let campaignState = {
   sentCount: 0,
   failedCount: 0,
   currentGroupName: null,
+  currentAdName: null,
   nextActionInSec: 0,
   statusText: "Pronto para disparar",
-  logs: [], // [{ time, groupName, status, detail }]
+  logs: [],
 };
 
 function addCampaignLog(groupName, status, detail) {
   const time = new Date().toLocaleTimeString("pt-BR", { timeZone: "America/Sao_Paulo" });
   campaignState.logs.unshift({ time, groupName, status, detail });
-  if (campaignState.logs.length > 100) campaignState.logs.pop();
+  if (campaignState.logs.length > 150) campaignState.logs.pop();
 }
 
-// Micro-variação invisível anti-ban no texto (caracteres zero-width + espaços sutis no final)
+// Micro-variação invisível anti-ban no texto (zero-width + espaços aleatórios sutis)
 function humanizeText(baseText, index) {
   if (!baseText) return "";
   const zwChars = ["\u200B", "\u200C", "\u200D", "\uFEFF"];
-  // Gera uma combinação única de caracteres invisíveis baseada no índice e timestamp
   const seed = Date.now() + index * 17;
   const zw1 = zwChars[seed % zwChars.length];
   const zw2 = zwChars[(seed >> 2) % zwChars.length];
@@ -162,7 +201,6 @@ function humanizeText(baseText, index) {
   return baseText + zw1 + zw2;
 }
 
-// Embaralhar array (Fisher-Yates) para nunca repetir a mesma sequência de grupos
 function shuffleArray(arr) {
   const copy = [...arr];
   for (let i = copy.length - 1; i > 0; i--) {
@@ -178,6 +216,20 @@ function randomInt(min, max) {
   return Math.floor(Math.random() * (b - a + 1)) + a;
 }
 
+// Converte dataURL/base64 em Buffer
+function parseImageData(dataUrl) {
+  if (!dataUrl || typeof dataUrl !== "string") return null;
+  const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+  if (match) {
+    return { mime: match[1], buffer: Buffer.from(match[2], "base64") };
+  }
+  try {
+    return { mime: "image/jpeg", buffer: Buffer.from(dataUrl, "base64") };
+  } catch (e) {
+    return null;
+  }
+}
+
 // Buscar todos os grupos em que o número conectado participa
 async function refreshGroups() {
   if (!waSocket || waStatus !== "CONNECTED") return cachedGroups;
@@ -191,17 +243,13 @@ async function refreshGroups() {
         let knownPhoneCount = 0;
         for (const p of parts) {
           const jidStr = p.phoneNumber || p.jid || p.id || "";
-          // Extrai apenas dígitos antes do @
           const num = jidStr.split("@")[0].split(":")[0].replace(/\D/g, "");
           if (num.startsWith("55") && num.length >= 12) {
             knownPhoneCount++;
-            if (num.slice(2, 4) === "11") {
-              ddd11Count++;
-            }
+            if (num.slice(2, 4) === "11") ddd11Count++;
           }
         }
         const ddd11Pct = knownPhoneCount > 0 ? Math.round((ddd11Count / knownPhoneCount) * 100) : null;
-
         return {
           id: g.id,
           subject: (g.subject || "").trim(),
@@ -213,7 +261,6 @@ async function refreshGroups() {
           restrict: !!g.restrict,
         };
       })
-      // Ignora subgrupos fantasmas sem nome e com 0 membros
       .filter((g) => g.subject.length > 0 && g.size > 0);
 
     list.sort((a, b) => a.subject.localeCompare(b.subject, "pt-BR"));
@@ -225,8 +272,8 @@ async function refreshGroups() {
   }
 }
 
-// ─── Motor de Disparo Humano Anti-Ban ────────────────────────────────────────
-async function startHumanBroadcast({ caption, imageBuffer, mimeType, targetGroupIds, source = "Painel Web" }) {
+// ─── Motor de Disparo Humano Anti-Ban com Mesclagem de Anúncios ─────────────
+async function startHumanBroadcast({ targetGroupIds, source = "Painel Web" }) {
   if (campaignState.isRunning) {
     throw new Error("Já existe um disparo em andamento. Aguarde terminar ou pause o atual.");
   }
@@ -236,11 +283,16 @@ async function startHumanBroadcast({ caption, imageBuffer, mimeType, targetGroup
   if (!targetGroupIds || targetGroupIds.length === 0) {
     throw new Error("Selecione pelo menos 1 grupo de vendas para disparar.");
   }
-  if (!caption?.trim() && !imageBuffer) {
-    throw new Error("Informe uma foto ou uma descrição para enviar.");
+
+  // Filtra apenas anúncios ativos que tenham texto ou foto
+  const activeAds = (appAds || []).filter(
+    (ad) => ad && ad.enabled && (ad.caption?.trim() || ad.imageBase64)
+  );
+
+  if (activeAds.length === 0) {
+    throw new Error("Cadastre e ative pelo menos 1 anúncio com foto ou descrição para disparar.");
   }
 
-  // Atualiza cache de nomes dos grupos se estiver vazio
   if (cachedGroups.length === 0) {
     await refreshGroups().catch(() => {});
   }
@@ -258,20 +310,21 @@ async function startHumanBroadcast({ caption, imageBuffer, mimeType, targetGroup
     sentCount: 0,
     failedCount: 0,
     currentGroupName: null,
+    currentAdName: null,
     nextActionInSec: 0,
-    statusText: `Iniciando disparo via ${source}...`,
+    statusText: `Iniciando disparo mesclado entre ${activeAds.length} anúncios...`,
     logs: [],
   };
 
-  if (caption?.trim()) {
-    appConfig.lastCaption = caption;
-    saveConfig();
-  }
+  addCampaignLog(
+    "Sistema",
+    "INFO",
+    `Disparo iniciado (${orderedIds.length} grupos) • Mesclando ${activeAds.length} anúncio(s) [${activeAds.map((a) => a.name).join(", ")}]`
+  );
 
-  addCampaignLog("Sistema", "INFO", `Disparo iniciado (${orderedIds.length} grupos) via ${source}`);
-
-  // Executa de forma assíncrona em background
+  // Executa em segundo plano
   (async () => {
+    let adIndex = 0;
     try {
       for (let i = 0; i < orderedIds.length; i++) {
         if (campaignState.shouldStop) {
@@ -284,11 +337,21 @@ async function startHumanBroadcast({ caption, imageBuffer, mimeType, targetGroup
         const groupName = groupMap.get(jid) || jid;
         campaignState.currentGroupName = groupName;
 
+        // Escolhe o anúncio da rodada (Round-Robin ou Random)
+        let chosenAd;
+        if (appConfig.rotationMode === "random") {
+          chosenAd = activeAds[Math.floor(Math.random() * activeAds.length)];
+        } else {
+          chosenAd = activeAds[adIndex % activeAds.length];
+          adIndex++;
+        }
+        campaignState.currentAdName = chosenAd.name;
+
         try {
-          // 1. Simular abertura do chat e presença humana ("digitando...")
+          // 1. Simular digitação humana
           if (appConfig.simulateTyping) {
             const typingSec = randomInt(3, 6);
-            campaignState.statusText = `Digitando mensagem no grupo "${groupName}" (${i + 1}/${orderedIds.length})...`;
+            campaignState.statusText = `Digitando no grupo "${groupName}" (${i + 1}/${orderedIds.length}) usando [${chosenAd.name}]...`;
             try {
               await waSocket.sendPresenceUpdate("composing", jid);
             } catch (e) {}
@@ -306,16 +369,17 @@ async function startHumanBroadcast({ caption, imageBuffer, mimeType, targetGroup
 
           if (campaignState.shouldStop) break;
 
-          // 2. Preparar texto humanizado com micro-variação invisível única
-          const finalCaption = humanizeText(caption || "", i);
+          // 2. Humanizar texto com assinatura invisível única
+          const finalCaption = humanizeText(chosenAd.caption || "", i);
+          const imgParsed = parseImageData(chosenAd.imageBase64);
 
-          // 3. Enviar imagem com legenda ou somente texto
-          campaignState.statusText = `Enviando para "${groupName}" (${i + 1}/${orderedIds.length})...`;
+          // 3. Enviar imagem ou texto
+          campaignState.statusText = `Enviando para "${groupName}" (${i + 1}/${orderedIds.length}) • ${chosenAd.name}...`;
           let sentMsg;
-          if (imageBuffer) {
+          if (imgParsed && imgParsed.buffer) {
             sentMsg = await waSocket.sendMessage(jid, {
-              image: imageBuffer,
-              mimetype: mimeType || "image/jpeg",
+              image: imgParsed.buffer,
+              mimetype: imgParsed.mime || "image/jpeg",
               caption: finalCaption,
             });
           } else {
@@ -326,15 +390,19 @@ async function startHumanBroadcast({ caption, imageBuffer, mimeType, targetGroup
           saveMessageToStore(sentMsg);
 
           campaignState.sentCount++;
-          addCampaignLog(groupName, "SUCCESS", `Enviado com sucesso (${campaignState.sentCount}/${orderedIds.length})`);
-          console.log(`✅ [DISPARO ${campaignState.sentCount}/${orderedIds.length}] Enviado para: ${groupName}`);
+          addCampaignLog(
+            groupName,
+            "SUCCESS",
+            `Enviado [${chosenAd.name}] (${campaignState.sentCount}/${orderedIds.length})`
+          );
+          console.log(`✅ [DISPARO ${campaignState.sentCount}/${orderedIds.length}] Enviado para ${groupName} com ${chosenAd.name}`);
         } catch (sendErr) {
           campaignState.failedCount++;
           addCampaignLog(groupName, "ERROR", `Falha: ${sendErr.message}`);
-          console.error(`❌ [ERRO DISPARO] Grupo ${groupName}:`, sendErr.message);
+          console.error(`❌ [ERRO DISPARO] ${groupName}:`, sendErr.message);
         }
 
-        // 4. Se ainda houver próximos grupos, aguardar intervalo aleatório humano (ex: 15s a 30s)
+        // 4. Intervalo aleatório anti-ban entre grupos
         if (i < orderedIds.length - 1 && !campaignState.shouldStop) {
           const waitSec = randomInt(appConfig.minDelaySec || 15, appConfig.maxDelaySec || 30);
           const nextName = groupMap.get(orderedIds[i + 1]) || orderedIds[i + 1];
@@ -342,7 +410,7 @@ async function startHumanBroadcast({ caption, imageBuffer, mimeType, targetGroup
           for (let remaining = waitSec; remaining > 0; remaining--) {
             if (campaignState.shouldStop) break;
             campaignState.nextActionInSec = remaining;
-            campaignState.statusText = `Aguardando intervalo humano anti-ban (${remaining}s) antes de enviar para "${nextName}"...`;
+            campaignState.statusText = `Intervalo humano anti-ban (${remaining}s) antes do próximo envio ("${nextName}")...`;
             await delay(1000);
           }
         }
@@ -351,14 +419,18 @@ async function startHumanBroadcast({ caption, imageBuffer, mimeType, targetGroup
       campaignState.isRunning = false;
       campaignState.nextActionInSec = 0;
       campaignState.currentGroupName = null;
+      campaignState.currentAdName = null;
       campaignState.finishedAt = new Date().toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" });
 
       if (!campaignState.shouldStop) {
         campaignState.statusText = `Concluído! ${campaignState.sentCount} enviados com sucesso, ${campaignState.failedCount} falhas.`;
-        addCampaignLog("Sistema", "DONE", `Finalizado: ${campaignState.sentCount} enviados, ${campaignState.failedCount} falhas.`);
+        addCampaignLog(
+          "Sistema",
+          "DONE",
+          `Finalizado: ${campaignState.sentCount} enviados, ${campaignState.failedCount} falhas.`
+        );
       }
 
-      // Salvar resumo no histórico
       appConfig.history.unshift({
         id: campaignState.id,
         startedAt: campaignState.startedAt,
@@ -366,8 +438,7 @@ async function startHumanBroadcast({ caption, imageBuffer, mimeType, targetGroup
         totalGroups: campaignState.totalGroups,
         sentCount: campaignState.sentCount,
         failedCount: campaignState.failedCount,
-        captionPreview: (caption || "").slice(0, 80),
-        hadImage: !!imageBuffer,
+        adsUsed: activeAds.map((a) => a.name),
         source,
       });
       if (appConfig.history.length > 30) appConfig.history.pop();
@@ -382,9 +453,7 @@ async function startHumanBroadcast({ caption, imageBuffer, mimeType, targetGroup
 async function initWhatsApp(forceReset = false) {
   if (forceReset) {
     if (waSocket) {
-      try {
-        waSocket.end(undefined);
-      } catch (e) {}
+      try { waSocket.end(undefined); } catch (e) {}
     }
     waSocket = null;
     waInitPromise = null;
@@ -406,7 +475,7 @@ async function initWhatsApp(forceReset = false) {
       if (!fs.existsSync(SESSION_DIR)) fs.mkdirSync(SESSION_DIR, { recursive: true });
 
       waStatus = "CONNECTING";
-      console.log("🔄 [WHATSAPP CLEDSON] Iniciando conexão com WhatsApp...");
+      console.log("🔄 [WHATSAPP CLEDSON] Conectando ao WhatsApp...");
 
       const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
       let version = [2, 3000, 1043857760];
@@ -436,15 +505,13 @@ async function initWhatsApp(forceReset = false) {
       waSocket = sock;
       sock.ev.on("creds.update", saveCreds);
 
-      // Escutar mensagens para gatilho rápido pelo próprio celular (#disparar ou #parar)
+      // Comandos pelo próprio celular
       sock.ev.on("messages.upsert", async ({ messages }) => {
         if (!Array.isArray(messages)) return;
         for (const m of messages) {
           saveMessageToStore(m);
-
           if (!m.key?.fromMe || !m.message) continue;
           const remoteJid = m.key.remoteJid || "";
-          // Ignorar comandos enviados dentro de grupos para evitar disparo acidental
           if (remoteJid.endsWith("@g.us") || remoteJid.includes("broadcast")) continue;
 
           const text =
@@ -456,7 +523,6 @@ async function initWhatsApp(forceReset = false) {
           if (!text) continue;
           const trimmed = text.trim();
 
-          // Comando para parar disparo pelo celular: #parar
           if (/^#parar$/i.test(trimmed)) {
             if (campaignState.isRunning) {
               campaignState.shouldStop = true;
@@ -467,42 +533,21 @@ async function initWhatsApp(forceReset = false) {
             continue;
           }
 
-          // Comando para disparar pelo celular: começa com #disparar
           if (/^#disparar\b/i.test(trimmed)) {
-            const cleanCaption = trimmed.replace(/^#disparar\s*/i, "").trim();
-            let imgBuf = null;
-            let mime = "image/jpeg";
-
-            const imgMsg =
-              m.message.imageMessage ||
-              m.message.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage;
-
-            if (m.message.imageMessage) {
-              try {
-                imgBuf = await downloadMediaMessage(m, "buffer", {}, { logger, reuploadRequest: sock.updateMediaMessage });
-                mime = m.message.imageMessage.mimetype || "image/jpeg";
-              } catch (err) {
-                console.error("Erro ao baixar imagem do comando #disparar:", err);
-              }
-            }
-
             if (!appConfig.selectedGroups || appConfig.selectedGroups.length === 0) {
               await sock.sendMessage(remoteJid, {
-                text: "⚠️ Nenhum grupo de vendas está selecionado ainda! Acesse o Painel Web da VPS e marque os grupos que devem receber os anúncios.",
+                text: "⚠️ Nenhum grupo de vendas selecionado! Acesse o Painel Web da VPS para marcar os grupos.",
               });
               continue;
             }
 
             try {
               await startHumanBroadcast({
-                caption: cleanCaption,
-                imageBuffer: imgBuf,
-                mimeType: mime,
                 targetGroupIds: appConfig.selectedGroups,
                 source: "Comando WhatsApp (#disparar)",
               });
               await sock.sendMessage(remoteJid, {
-                text: `🚀 *Disparo Humano Iniciado!*\n\n📦 *Grupos selecionados:* ${appConfig.selectedGroups.length}\n⏱️ *Intervalo Anti-Ban:* ${appConfig.minDelaySec}s a ${appConfig.maxDelaySec}s\n\n_(Envie *#parar* aqui caso queira cancelar)_`,
+                text: `🚀 *Disparo Humano Mesclado Iniciado!*\n\n📦 *Grupos selecionados:* ${appConfig.selectedGroups.length}\n🎯 *Modo de rotação:* ${appConfig.rotationMode}\n⏱️ *Intervalo Anti-Ban:* ${appConfig.minDelaySec}s a ${appConfig.maxDelaySec}s\n\n_(Envie *#parar* a qualquer momento para cancelar)_`,
               });
             } catch (err) {
               await sock.sendMessage(remoteJid, { text: `❌ Erro ao iniciar disparo: ${err.message}` });
@@ -519,7 +564,6 @@ async function initWhatsApp(forceReset = false) {
             waQrRaw = qr;
             waQrCode = await QRCode.toDataURL(qr, { margin: 2, width: 380 });
             waStatus = "SCAN_QR";
-            console.log("📱 [WHATSAPP CLEDSON] Novo QR Code gerado!");
             await QRCode.toFile(path.join(__dirname, "qrcode.png"), qr, { margin: 2, width: 400 });
           } catch (e) {}
         }
@@ -536,13 +580,9 @@ async function initWhatsApp(forceReset = false) {
           waName = null;
 
           if (reconnect) {
-            console.log("⚠️  Desconectado. Reconectando em 3s...");
             setTimeout(() => initWhatsApp(), 3000);
           } else {
-            console.log("🚫 Logout detectado (401). Limpando sessão e gerando novo QR Code...");
-            try {
-              fs.rmSync(SESSION_DIR, { recursive: true, force: true });
-            } catch (e) {}
+            try { fs.rmSync(SESSION_DIR, { recursive: true, force: true }); } catch (e) {}
             setTimeout(() => initWhatsApp(), 2000);
           }
         } else if (connection === "open") {
@@ -551,8 +591,7 @@ async function initWhatsApp(forceReset = false) {
           waQrRaw = null;
           waUser = (sock.user?.id || "").split(":")[0];
           waName = sock.user?.name || "Cledson";
-          console.log("✅ [WHATSAPP CLEDSON] Conectado com sucesso:", waUser, waName);
-          // Carregar grupos automaticamente após conectar
+          console.log("✅ [WHATSAPP CLEDSON] Conectado:", waUser, waName);
           setTimeout(() => refreshGroups().catch(() => {}), 2000);
         }
       });
@@ -576,7 +615,7 @@ const app = express();
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
-// GET /status — status da conexão + estado da campanha ao vivo
+// GET /status
 app.get("/status", (req, res) => {
   res.json({
     status: waStatus,
@@ -585,18 +624,12 @@ app.get("/status", (req, res) => {
     hasQr: !!waQrCode,
     qrCodeDataUrl: waQrCode,
     campaign: campaignState,
-    config: {
-      selectedGroups: appConfig.selectedGroups,
-      minDelaySec: appConfig.minDelaySec,
-      maxDelaySec: appConfig.maxDelaySec,
-      shuffleGroups: appConfig.shuffleGroups,
-      simulateTyping: appConfig.simulateTyping,
-      history: appConfig.history,
-    },
+    config: appConfig,
+    ads: appAds,
   });
 });
 
-// GET /groups — lista todos os grupos do WhatsApp conectado
+// GET /groups
 app.get("/groups", async (req, res) => {
   const force = req.query.refresh === "1";
   if (force || cachedGroups.length === 0) {
@@ -608,11 +641,11 @@ app.get("/groups", async (req, res) => {
   });
 });
 
-// POST /groups/leave — sai e apaga uma lista de grupos (groupIds)
+// POST /groups/leave
 app.post("/groups/leave", async (req, res) => {
   const { groupIds } = req.body;
   if (!Array.isArray(groupIds) || groupIds.length === 0) {
-    return res.status(400).json({ success: false, error: "groupIds deve ser uma lista de JIDs" });
+    return res.status(400).json({ success: false, error: "groupIds deve ser uma lista" });
   }
   if (!waSocket || waStatus !== "CONNECTED") {
     return res.status(503).json({ success: false, error: "WhatsApp não conectado" });
@@ -629,10 +662,8 @@ app.post("/groups/leave", async (req, res) => {
     try {
       await waSocket.groupLeave(jid);
       leftOk = true;
-      console.log(`🚪 Saiu do grupo: ${groupName} (${jid})`);
     } catch (err) {
       errorMsg = err.message;
-      console.warn(`⚠️ Aviso ao sair do grupo ${groupName} (${jid}):`, err.message);
     }
 
     await delay(800);
@@ -646,11 +677,8 @@ app.post("/groups/leave", async (req, res) => {
         jid
       );
       deletedOk = true;
-    } catch (delErr) {
-      // Mesmo se o chatModify falhar por falta de mensagem local no cache, o groupLeave já removeu do grupo
-    }
+    } catch (delErr) {}
 
-    // Remove da memória e dos selecionados
     cachedGroups = cachedGroups.filter((g) => g.id !== jid);
     appConfig.selectedGroups = (appConfig.selectedGroups || []).filter((id) => id !== jid);
 
@@ -663,49 +691,49 @@ app.post("/groups/leave", async (req, res) => {
   res.json({ success: true, results, remainingGroups: cachedGroups.length });
 });
 
-// POST /config — salva grupos selecionados e parâmetros de delay anti-ban
+// POST /config
 app.post("/config", (req, res) => {
-  const { selectedGroups, minDelaySec, maxDelaySec, shuffleGroups, simulateTyping, lastCaption } = req.body;
+  const { selectedGroups, minDelaySec, maxDelaySec, shuffleGroups, simulateTyping, rotationMode } = req.body;
   if (Array.isArray(selectedGroups)) appConfig.selectedGroups = selectedGroups;
   if (typeof minDelaySec === "number" && minDelaySec >= 5) appConfig.minDelaySec = minDelaySec;
   if (typeof maxDelaySec === "number" && maxDelaySec >= appConfig.minDelaySec) appConfig.maxDelaySec = maxDelaySec;
   if (typeof shuffleGroups === "boolean") appConfig.shuffleGroups = shuffleGroups;
   if (typeof simulateTyping === "boolean") appConfig.simulateTyping = simulateTyping;
-  if (typeof lastCaption === "string") appConfig.lastCaption = lastCaption;
+  if (rotationMode === "round_robin" || rotationMode === "random") appConfig.rotationMode = rotationMode;
 
   saveConfig();
   res.json({ success: true, config: appConfig });
 });
 
-// POST /broadcast — inicia o disparo humano anti-ban nos grupos selecionados
+// POST /ads — salva os anúncios (fotos e legendas)
+app.post("/ads", (req, res) => {
+  const { ads } = req.body;
+  if (Array.isArray(ads)) {
+    appAds = ads;
+    saveAds();
+    return res.json({ success: true, ads: appAds });
+  }
+  res.status(400).json({ success: false, error: "ads deve ser um array" });
+});
+
+// POST /broadcast — dispara a rotação mesclada nos grupos
 app.post("/broadcast", async (req, res) => {
   try {
-    const { caption, imageBase64, selectedGroups, minDelaySec, maxDelaySec, shuffleGroups, simulateTyping } = req.body;
+    const { ads, selectedGroups, minDelaySec, maxDelaySec, shuffleGroups, simulateTyping, rotationMode } = req.body;
 
+    if (Array.isArray(ads)) {
+      appAds = ads;
+      saveAds();
+    }
     if (Array.isArray(selectedGroups)) appConfig.selectedGroups = selectedGroups;
     if (typeof minDelaySec === "number" && minDelaySec >= 5) appConfig.minDelaySec = minDelaySec;
     if (typeof maxDelaySec === "number" && maxDelaySec >= appConfig.minDelaySec) appConfig.maxDelaySec = maxDelaySec;
     if (typeof shuffleGroups === "boolean") appConfig.shuffleGroups = shuffleGroups;
     if (typeof simulateTyping === "boolean") appConfig.simulateTyping = simulateTyping;
+    if (rotationMode === "round_robin" || rotationMode === "random") appConfig.rotationMode = rotationMode;
     saveConfig();
 
-    let imageBuffer = null;
-    let mimeType = "image/jpeg";
-
-    if (imageBase64 && typeof imageBase64 === "string") {
-      const match = imageBase64.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
-      if (match) {
-        mimeType = match[1];
-        imageBuffer = Buffer.from(match[2], "base64");
-      } else {
-        imageBuffer = Buffer.from(imageBase64, "base64");
-      }
-    }
-
     const state = await startHumanBroadcast({
-      caption,
-      imageBuffer,
-      mimeType,
       targetGroupIds: appConfig.selectedGroups,
       source: "Painel Web",
     });
@@ -716,49 +744,44 @@ app.post("/broadcast", async (req, res) => {
   }
 });
 
-// POST /broadcast/stop — interrompe o disparo imediatamente
+// POST /broadcast/stop
 app.post("/broadcast/stop", (req, res) => {
   if (campaignState.isRunning) {
     campaignState.shouldStop = true;
-    return res.json({ success: true, message: "Solicitação de parada enviada." });
+    return res.json({ success: true, message: "Parando disparo..." });
   }
-  res.json({ success: true, message: "Nenhum disparo estava rodando." });
+  res.json({ success: true, message: "Nenhum disparo rodando." });
 });
 
-// POST /reset — desconecta ou gera novo QR Code
+// POST /reset
 app.post("/reset", async (req, res) => {
   await initWhatsApp(true).catch(() => {});
-  res.json({ success: true, message: "Sessão reiniciada. Gerando novo QR Code..." });
+  res.json({ success: true, message: "Sessão reiniciada." });
 });
 
-// GET /qr.png — imagem direta do QR Code
+// GET /qr.png
 app.get("/qr.png", async (req, res) => {
-  if (!waQrRaw) {
-    return res.status(404).send("QR Code não disponível no momento.");
-  }
+  if (!waQrRaw) return res.status(404).send("QR não disponível");
   try {
     const buf = await QRCode.toBuffer(waQrRaw, { margin: 2, width: 400 });
     res.setHeader("Content-Type", "image/png");
-    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
     res.send(buf);
   } catch (err) {
     res.status(500).send("Erro ao gerar PNG");
   }
 });
 
-// GET / e /qr — Painel Web Completo (Conexão QR Code + Disparador Anti-Ban de Grupos)
+// GET / e /qr — Painel com Sistema Multi-Anúncios Mesclados Anti-Ban
 app.get(["/", "/qr"], async (req, res) => {
-  if (!waQrCode && waStatus !== "CONNECTED") {
-    initWhatsApp().catch(() => {});
-  }
+  if (!waQrCode && waStatus !== "CONNECTED") initWhatsApp().catch(() => {});
 
-  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
   res.send(`<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>WhatsApp Cledson — Disparador de Grupos Anti-Ban</title>
+  <title>WhatsApp Cledson — Disparador Multi-Anúncios Anti-Ban</title>
   <style>
     :root {
       --bg: #0b141a;
@@ -780,10 +803,7 @@ app.get(["/", "/qr"], async (req, res) => {
       min-height: 100vh;
       padding: 20px;
     }
-    .container {
-      max-width: 1200px;
-      margin: 0 auto;
-    }
+    .container { max-width: 1280px; margin: 0 auto; }
     header {
       display: flex;
       flex-wrap: wrap;
@@ -792,82 +812,50 @@ app.get(["/", "/qr"], async (req, res) => {
       gap: 16px;
       background: var(--card);
       border: 1px solid var(--border);
-      padding: 18px 24px;
+      padding: 16px 22px;
       border-radius: 16px;
       margin-bottom: 20px;
     }
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 14px;
-    }
+    .brand { display: flex; align-items: center; gap: 14px; }
     .brand-icon {
-      width: 44px;
-      height: 44px;
-      border-radius: 12px;
-      background: rgba(37, 211, 102, 0.15);
-      color: var(--green);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 22px;
-      font-weight: bold;
+      width: 44px; height: 44px; border-radius: 12px;
+      background: rgba(37, 211, 102, 0.15); color: var(--green);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 22px; font-weight: bold;
     }
     .brand h1 { font-size: 19px; font-weight: 700; color: #fff; }
     .brand p { font-size: 13px; color: var(--muted); margin-top: 2px; }
     .status-pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 8px 16px;
-      border-radius: 999px;
-      font-size: 13px;
-      font-weight: 600;
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 8px 16px; border-radius: 999px; font-size: 13px; font-weight: 600;
     }
     .status-pill.connected { background: rgba(37, 211, 102, 0.16); color: var(--green); border: 1px solid rgba(37, 211, 102, 0.3); }
     .status-pill.wait { background: rgba(245, 158, 11, 0.16); color: var(--warn); border: 1px solid rgba(245, 158, 11, 0.3); }
 
-    /* QR Screen */
     .qr-screen {
-      max-width: 460px;
-      margin: 40px auto;
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 20px;
-      padding: 32px 24px;
-      text-align: center;
+      max-width: 460px; margin: 40px auto; background: var(--card);
+      border: 1px solid var(--border); border-radius: 20px; padding: 32px 24px; text-align: center;
     }
     .qr-wrapper {
-      background: #fff;
-      padding: 16px;
-      border-radius: 16px;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      min-width: 270px;
-      min-height: 270px;
-      margin: 20px 0;
+      background: #fff; padding: 16px; border-radius: 16px;
+      display: inline-flex; align-items: center; justify-content: center;
+      min-width: 270px; min-height: 270px; margin: 20px 0;
     }
     .qr-wrapper img { width: 250px; height: 250px; display: block; }
     .spinner {
-      width: 42px;
-      height: 42px;
-      border: 4px solid #e5e7eb;
-      border-top-color: var(--green);
-      border-radius: 50%;
+      width: 42px; height: 42px; border: 4px solid #e5e7eb;
+      border-top-color: var(--green); border-radius: 50%;
       animation: spin 0.9s linear infinite;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    /* Main Grid */
     .grid {
       display: grid;
-      grid-template-columns: 1.05fr 0.95fr;
+      grid-template-columns: 1.15fr 0.85fr;
       gap: 20px;
     }
-    @media (max-width: 920px) {
-      .grid { grid-template-columns: 1fr; }
-    }
+    @media (max-width: 980px) { .grid { grid-template-columns: 1fr; } }
+
     .panel {
       background: var(--card);
       border: 1px solid var(--border);
@@ -875,455 +863,286 @@ app.get(["/", "/qr"], async (req, res) => {
       padding: 22px;
     }
     .panel-title {
-      font-size: 16px;
-      font-weight: 700;
-      margin-bottom: 6px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
+      font-size: 16px; font-weight: 700; margin-bottom: 6px;
+      display: flex; align-items: center; justify-content: space-between;
     }
-    .panel-sub {
-      font-size: 13px;
-      color: var(--muted);
-      margin-bottom: 18px;
-    }
+    .panel-sub { font-size: 13px; color: var(--muted); margin-bottom: 18px; }
 
-    /* Form Controls */
-    label.field-label {
-      display: block;
-      font-size: 13px;
-      font-weight: 600;
-      color: #d1d7db;
-      margin-bottom: 8px;
+    /* Tabs de Anúncios */
+    .tabs-bar {
+      display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; align-items: center;
     }
+    .tab-btn {
+      background: var(--card-2); color: var(--text); border: 1px solid var(--border);
+      padding: 9px 14px; border-radius: 10px; font-size: 13px; font-weight: 600;
+      cursor: pointer; transition: 0.15s; display: inline-flex; align-items: center; gap: 6px;
+    }
+    .tab-btn:hover { background: #222e35; }
+    .tab-btn.active {
+      background: rgba(37, 211, 102, 0.15); color: var(--green); border-color: rgba(37, 211, 102, 0.4);
+    }
+    .tab-dot {
+      width: 8px; height: 8px; border-radius: 50%; background: #64748b;
+    }
+    .tab-btn.active .tab-dot { background: var(--green); }
+    .tab-btn.has-content .tab-dot { background: #38bdf8; }
+    .tab-btn.active.has-content .tab-dot { background: var(--green); }
+
+    .ad-card {
+      background: var(--card-2); border: 1px solid var(--border); border-radius: 14px; padding: 18px; margin-bottom: 16px;
+    }
+    .ad-card-header {
+      display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;
+    }
+    .ad-name-input {
+      background: var(--card); border: 1px solid #2a3942; color: #fff;
+      padding: 6px 12px; border-radius: 8px; font-size: 14px; font-weight: 600; width: 60%;
+    }
+    .ad-toggle-label {
+      font-size: 13px; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; color: #d1d7db;
+    }
+    .ad-toggle-label input { width: 16px; height: 16px; accent-color: var(--green); }
+
     .upload-zone {
-      border: 2px dashed #2a3942;
-      background: var(--card-2);
-      border-radius: 14px;
-      padding: 20px;
-      text-align: center;
-      cursor: pointer;
-      transition: 0.2s;
-      margin-bottom: 18px;
-      position: relative;
+      border: 2px dashed #2a3942; background: var(--card);
+      border-radius: 12px; padding: 16px; text-align: center; cursor: pointer;
+      transition: 0.2s; margin-bottom: 14px;
     }
-    .upload-zone:hover, .upload-zone.dragover {
-      border-color: var(--green);
-      background: rgba(37, 211, 102, 0.05);
-    }
-    .upload-zone input[type="file"] {
-      display: none;
-    }
-    .preview-container {
-      position: relative;
-      display: inline-block;
-      max-width: 100%;
-    }
+    .upload-zone:hover { border-color: var(--green); background: rgba(37, 211, 102, 0.04); }
+    .upload-zone input[type="file"] { display: none; }
     .preview-container img {
-      max-height: 240px;
-      max-width: 100%;
-      border-radius: 10px;
-      border: 1px solid var(--border);
-      display: block;
-      margin: 0 auto;
+      max-height: 200px; max-width: 100%; border-radius: 8px; display: block; margin: 0 auto;
     }
     .remove-img-btn {
-      margin-top: 10px;
-      background: rgba(239, 68, 68, 0.15);
-      color: #f87171;
-      border: 1px solid rgba(239, 68, 68, 0.3);
-      padding: 6px 12px;
-      border-radius: 8px;
-      font-size: 12px;
-      cursor: pointer;
+      margin-top: 8px; background: rgba(239, 68, 68, 0.15); color: #f87171;
+      border: 1px solid rgba(239, 68, 68, 0.3); padding: 5px 10px; border-radius: 6px;
+      font-size: 12px; cursor: pointer;
     }
+
     textarea {
-      width: 100%;
-      min-height: 210px;
-      background: var(--card-2);
-      border: 1px solid #2a3942;
-      border-radius: 12px;
-      padding: 14px;
-      color: #fff;
-      font-family: inherit;
-      font-size: 14px;
-      line-height: 1.5;
-      resize: vertical;
-      margin-bottom: 16px;
+      width: 100%; min-height: 170px; background: var(--card); border: 1px solid #2a3942;
+      border-radius: 10px; padding: 12px; color: #fff; font-family: inherit; font-size: 13.5px;
+      line-height: 1.45; resize: vertical; margin-bottom: 12px;
     }
-    textarea:focus, input[type="text"]:focus, input[type="number"]:focus {
-      outline: none;
-      border-color: var(--green);
+    textarea:focus, input:focus, select:focus { outline: none; border-color: var(--green); }
+
+    .mode-select-box {
+      background: var(--card-2); border: 1px solid var(--border); border-radius: 12px;
+      padding: 14px; margin-bottom: 16px; display: flex; flex-direction: column; gap: 8px;
+    }
+    .mode-select-box select {
+      background: var(--card); border: 1px solid #2a3942; color: #fff;
+      padding: 9px 12px; border-radius: 8px; font-size: 13.5px;
     }
 
-    /* WhatsApp Bubble Preview */
-    .wa-preview-box {
-      background: #0b141a;
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 14px;
-      margin-bottom: 18px;
-    }
-    .wa-preview-title {
-      font-size: 12px;
-      color: var(--muted);
-      margin-bottom: 8px;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }
-    .wa-bubble {
-      background: #005c4b;
-      color: #e9edef;
-      border-radius: 12px;
-      padding: 8px;
-      max-width: 340px;
-      font-size: 13.5px;
-      line-height: 1.45;
-      white-space: pre-wrap;
-      word-break: break-word;
-      box-shadow: 0 2px 6px rgba(0,0,0,0.3);
-    }
-    .wa-bubble img {
-      width: 100%;
-      border-radius: 8px;
-      margin-bottom: 6px;
-      display: none;
-    }
-    .wa-bubble-text {
-      padding: 2px 4px 4px;
-    }
-
-    /* Anti-ban settings row */
     .settings-row {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 12px;
-      background: var(--card-2);
-      padding: 14px;
-      border-radius: 12px;
-      margin-bottom: 18px;
-      border: 1px solid var(--border);
+      display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+      background: var(--card-2); padding: 14px; border-radius: 12px; margin-bottom: 16px; border: 1px solid var(--border);
     }
     .settings-row input[type="number"] {
-      width: 100%;
-      background: var(--card);
-      border: 1px solid #2a3942;
-      color: #fff;
-      padding: 8px 10px;
-      border-radius: 8px;
-      font-size: 14px;
-      margin-top: 4px;
+      width: 100%; background: var(--card); border: 1px solid #2a3942; color: #fff;
+      padding: 8px 10px; border-radius: 8px; font-size: 14px; margin-top: 4px;
     }
     .checkbox-row {
-      display: flex;
-      gap: 16px;
-      flex-wrap: wrap;
-      margin-bottom: 18px;
-      font-size: 13px;
-      color: #d1d7db;
+      display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; font-size: 13px; color: #d1d7db;
     }
-    .checkbox-row label {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      cursor: pointer;
-    }
+    .checkbox-row label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
 
-    /* Buttons */
     .btn {
-      background: #202c33;
-      color: var(--text);
-      border: 1px solid #2a3942;
-      padding: 9px 15px;
-      border-radius: 10px;
-      font-size: 13px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: 0.2s;
+      background: #202c33; color: var(--text); border: 1px solid #2a3942;
+      padding: 9px 15px; border-radius: 10px; font-size: 13px; font-weight: 600; cursor: pointer; transition: 0.15s;
     }
     .btn:hover { background: #2a3942; }
     .btn-primary {
-      width: 100%;
-      background: var(--green);
-      color: #0b141a;
-      border: none;
-      padding: 14px 20px;
-      font-size: 15px;
-      font-weight: 700;
-      border-radius: 12px;
-      cursor: pointer;
-      transition: 0.2s;
+      width: 100%; background: var(--green); color: #0b141a; border: none;
+      padding: 14px 20px; font-size: 15px; font-weight: 700; border-radius: 12px; cursor: pointer; transition: 0.2s;
     }
     .btn-primary:hover { background: var(--green-dark); }
-    .btn-primary:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
+    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
     .btn-stop {
-      width: 100%;
-      background: var(--danger);
-      color: #fff;
-      border: none;
-      padding: 13px 20px;
-      font-size: 15px;
-      font-weight: 700;
-      border-radius: 12px;
-      cursor: pointer;
-      margin-top: 10px;
+      width: 100%; background: var(--danger); color: #fff; border: none;
+      padding: 13px 20px; font-size: 15px; font-weight: 700; border-radius: 12px; cursor: pointer; margin-top: 10px;
     }
 
-    /* Group Selector */
-    .group-toolbar {
-      display: flex;
-      gap: 8px;
-      margin-bottom: 12px;
-      flex-wrap: wrap;
-    }
+    /* Coluna Direita (Grupos) */
+    .group-toolbar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
     .group-search {
-      flex: 1;
-      min-width: 180px;
-      background: var(--card-2);
-      border: 1px solid #2a3942;
-      color: #fff;
-      padding: 9px 12px;
-      border-radius: 10px;
-      font-size: 13.5px;
+      flex: 1; min-width: 180px; background: var(--card-2); border: 1px solid #2a3942;
+      color: #fff; padding: 9px 12px; border-radius: 10px; font-size: 13.5px;
     }
     .groups-list {
-      max-height: 360px;
-      overflow-y: auto;
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      background: var(--card-2);
-      divide-y: 1px solid var(--border);
+      max-height: 380px; overflow-y: auto; border: 1px solid var(--border);
+      border-radius: 12px; background: var(--card-2);
     }
     .group-item {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 11px 14px;
-      border-bottom: 1px solid var(--border);
-      cursor: pointer;
-      transition: 0.15s;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 14px; border-bottom: 1px solid var(--border); cursor: pointer; transition: 0.15s;
     }
     .group-item:last-child { border-bottom: none; }
     .group-item:hover { background: rgba(255,255,255,0.03); }
     .group-item.selected { background: rgba(37, 211, 102, 0.08); }
-    .group-left {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      min-width: 0;
-    }
-    .group-left input[type="checkbox"] {
-      width: 17px;
-      height: 17px;
-      accent-color: var(--green);
-      cursor: pointer;
-    }
+    .group-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .group-left input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--green); cursor: pointer; }
     .group-name {
-      font-size: 14px;
-      font-weight: 600;
-      color: #fff;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      max-width: 280px;
+      font-size: 13.5px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 240px;
     }
-    .group-meta {
-      font-size: 12px;
-      color: var(--muted);
-      white-space: nowrap;
-    }
+    .group-meta { font-size: 12px; color: var(--muted); white-space: nowrap; }
 
-    /* Progress & Live Logs */
     .progress-card {
-      margin-top: 18px;
-      background: var(--card-2);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 16px;
+      margin-top: 18px; background: var(--card-2); border: 1px solid var(--border);
+      border-radius: 12px; padding: 16px;
     }
     .progress-bar-bg {
-      width: 100%;
-      height: 10px;
-      background: #0b141a;
-      border-radius: 999px;
-      overflow: hidden;
-      margin: 10px 0;
+      width: 100%; height: 10px; background: #0b141a; border-radius: 999px; overflow: hidden; margin: 10px 0;
     }
-    .progress-bar-fill {
-      height: 100%;
-      background: var(--green);
-      width: 0%;
-      transition: width 0.4s ease;
-    }
+    .progress-bar-fill { height: 100%; background: var(--green); width: 0%; transition: width 0.4s ease; }
     .logs-box {
-      max-height: 200px;
-      overflow-y: auto;
-      background: #0b141a;
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 10px;
-      font-family: monospace;
-      font-size: 12px;
-      margin-top: 12px;
+      max-height: 200px; overflow-y: auto; background: #0b141a; border: 1px solid var(--border);
+      border-radius: 10px; padding: 10px; font-family: monospace; font-size: 12px; margin-top: 12px;
     }
-    .log-entry {
-      padding: 4px 0;
-      border-bottom: 1px solid rgba(255,255,255,0.05);
-    }
+    .log-entry { padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
     .log-entry.SUCCESS { color: #4ade80; }
     .log-entry.ERROR { color: #f87171; }
     .log-entry.WARN { color: #fbbf24; }
     .log-entry.INFO, .log-entry.DONE { color: #93c5fd; }
-    .tip-box {
-      margin-top: 16px;
-      background: rgba(37, 211, 102, 0.08);
-      border: 1px solid rgba(37, 211, 102, 0.25);
-      border-radius: 12px;
-      padding: 12px 14px;
-      font-size: 12.5px;
-      color: #d1d7db;
-      line-height: 1.5;
-    }
   </style>
 </head>
 <body>
   <div class="container">
     <header>
       <div class="brand">
-        <div class="brand-icon">📲</div>
+        <div class="brand-icon">🔄</div>
         <div>
-          <h1>WhatsApp Cledson — Disparador Humano Anti-Ban</h1>
-          <p id="accountSubtitle">Verificando sessão na VPS...</p>
+          <h1>WhatsApp Cledson — Disparador Multi-Anúncios Anti-Ban</h1>
+          <p id="accountSubtitle">Sincronizando com a VPS...</p>
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;">
-        <div id="statusPill" class="status-pill wait">⏳ Sincronizando...</div>
-        <button class="btn" onclick="resetSession()" title="Desconectar ou Trocar WhatsApp">Trocar Número</button>
+        <div id="statusPill" class="status-pill wait">⏳ Conectando...</div>
+        <button class="btn" onclick="resetSession()">Trocar Número</button>
       </div>
     </header>
 
-    <!-- Tela de QR Code (Exibida apenas quando desconectado) -->
     <div id="qrSection" class="qr-screen" style="display:none;">
-      <h2>Escaneie o QR Code com seu WhatsApp</h2>
-      <p style="color:var(--muted);font-size:14px;margin-top:6px;">
-        Abra o WhatsApp → Configurações → Dispositivos conectados → Conectar dispositivo
-      </p>
-      <div class="qr-wrapper" id="qrBox">
-        <div class="spinner"></div>
-      </div>
-      <div>
-        <button class="btn" onclick="resetSession()">🔄 Gerar Novo QR Code</button>
-      </div>
+      <h2>Escaneie o QR Code</h2>
+      <div class="qr-wrapper" id="qrBox"><div class="spinner"></div></div>
+      <button class="btn" onclick="resetSession()">🔄 Gerar Novo QR Code</button>
     </div>
 
-    <!-- Painel Principal de Disparo (Exibido quando conectado) -->
     <div id="appSection" class="grid" style="display:none;">
-      <!-- Coluna Esquerda: Criar Anúncio (Foto + Descrição) -->
+      <!-- Coluna Esquerda: Anúncios Mesclados -->
       <div class="panel">
         <div class="panel-title">
-          <span>1. Montar Oferta (Foto + Descrição)</span>
-          <span style="font-size:12px;color:var(--green);">🛡️ Proteção Anti-Ban Ativa</span>
+          <span>1. Seus Anúncios Mesclados (Anti-Ban)</span>
+          <span style="font-size:12px;color:var(--green);">🛡️ Rotação Ativa</span>
         </div>
-        <p class="panel-sub">Envie ou cole (Ctrl+V) a foto do produto e digite a descrição exatamente como quer nos grupos.</p>
+        <p class="panel-sub">Cadastre seus 3 anúncios abaixo. A cada grupo, o sistema alterna o anúncio enviado para o WhatsApp nunca ver conteúdo repetido!</p>
 
-        <label class="field-label">📸 Foto do Produto (Clique, Arraste ou Cole com Ctrl+V)</label>
-        <div class="upload-zone" id="uploadZone" onclick="document.getElementById('fileInput').click()">
-          <input type="file" id="fileInput" accept="image/*" onchange="handleFileSelect(event)" />
-          <div id="uploadPlaceholder">
-            <div style="font-size:28px;margin-bottom:6px;">🖼️</div>
-            <div style="font-weight:600;font-size:14px;color:#fff;">Clique para escolher a foto ou cole (Ctrl+V)</div>
-            <div style="font-size:12px;color:var(--muted);margin-top:4px;">Suporta JPG, PNG, WEBP</div>
+        <!-- Abas dos Anúncios -->
+        <div class="tabs-bar" id="tabsBar"></div>
+
+        <!-- Conteúdo do Anúncio Ativo -->
+        <div class="ad-card" id="adEditorCard">
+          <div class="ad-card-header">
+            <input type="text" id="adNameInput" class="ad-name-input" placeholder="Nome do Anúncio" oninput="onAdFieldChange()" />
+            <label class="ad-toggle-label">
+              <input type="checkbox" id="adEnabledCheck" onchange="onAdFieldChange()" checked />
+              Incluir no Disparo
+            </label>
           </div>
-          <div id="uploadPreview" class="preview-container" style="display:none;">
-            <img id="previewImg" src="" alt="Preview" />
-            <button type="button" class="remove-img-btn" onclick="removeImage(event)">🗑️ Remover Foto</button>
+
+          <label style="font-size:12px;font-weight:600;color:#d1d7db;display:block;margin-bottom:6px;">
+            📸 Foto do Anúncio (Clique, Arraste ou Cole com Ctrl+V)
+          </label>
+          <div class="upload-zone" id="uploadZone" onclick="document.getElementById('fileInput').click()">
+            <input type="file" id="fileInput" accept="image/*" onchange="handleFileSelect(event)" />
+            <div id="uploadPlaceholder">
+              <div style="font-size:26px;margin-bottom:4px;">🖼️</div>
+              <div style="font-size:13px;font-weight:600;color:#fff;">Clique para adicionar foto ou cole (Ctrl+V)</div>
+            </div>
+            <div id="uploadPreview" class="preview-container" style="display:none;">
+              <img id="previewImg" src="" alt="Foto" />
+              <button type="button" class="remove-img-btn" onclick="removeImage(event)">🗑️ Remover Foto</button>
+            </div>
           </div>
+
+          <label style="font-size:12px;font-weight:600;color:#d1d7db;display:block;margin-bottom:6px;">
+            📝 Descrição / Legenda
+          </label>
+          <textarea id="captionInput" placeholder="Digite o texto deste anúncio..." oninput="onAdFieldChange()"></textarea>
         </div>
 
-        <label class="field-label">📝 Descrição / Legenda da Oferta</label>
-        <textarea id="captionInput" placeholder="Digite a descrição do produto..." oninput="updatePreview()">${(appConfig.lastCaption || "").replace(/</g, "&lt;")}</textarea>
-
-        <!-- Pré-visualização idêntica ao WhatsApp -->
-        <div class="wa-preview-box">
-          <div class="wa-preview-title">Pré-visualização no Grupo de WhatsApp:</div>
-          <div class="wa-bubble">
-            <img id="bubbleImg" src="" alt="Foto" />
-            <div class="wa-bubble-text" id="bubbleText"></div>
-          </div>
+        <!-- Modo de Rotação / Mesclagem -->
+        <div class="mode-select-box">
+          <label style="font-size:12.5px;font-weight:600;color:#fff;">🎯 Como mesclar os anúncios entre os grupos?</label>
+          <select id="rotationModeSelect" onchange="saveAllSettings()">
+            <option value="round_robin">Alternar em Ordem: Anúncio 1 ➔ Anúncio 2 ➔ Anúncio 3 ➔ Repete (Recomendado)</option>
+            <option value="random">Sorteio Aleatório a cada grupo</option>
+          </select>
+          <span style="font-size:11.5px;color:var(--muted);">
+            Cada grupo recebe uma oferta diferente, quebrando o padrão de repetição do algoritmo do WhatsApp.
+          </span>
         </div>
 
-        <!-- Configurações Anti-Ban -->
-        <label class="field-label">⏱️ Velocidade e Comportamento Humano (Anti-Ban)</label>
+        <!-- Configurações de Intervalo Humano -->
         <div class="settings-row">
           <div>
             <span style="font-size:12px;color:var(--muted);">Espera Mínima (segundos)</span>
-            <input type="number" id="minDelayInput" value="${appConfig.minDelaySec || 15}" min="5" max="300" onchange="saveSettings()" />
+            <input type="number" id="minDelayInput" value="15" min="5" max="300" onchange="saveAllSettings()" />
           </div>
           <div>
             <span style="font-size:12px;color:var(--muted);">Espera Máxima (segundos)</span>
-            <input type="number" id="maxDelayInput" value="${appConfig.maxDelaySec || 30}" min="10" max="600" onchange="saveSettings()" />
+            <input type="number" id="maxDelayInput" value="30" min="10" max="600" onchange="saveAllSettings()" />
           </div>
         </div>
 
         <div class="checkbox-row">
           <label>
-            <input type="checkbox" id="typingCheck" ${appConfig.simulateTyping ? "checked" : ""} onchange="saveSettings()" />
+            <input type="checkbox" id="typingCheck" checked onchange="saveAllSettings()" />
             Simular "digitando..." antes de enviar
           </label>
           <label>
-            <input type="checkbox" id="shuffleCheck" ${appConfig.shuffleGroups ? "checked" : ""} onchange="saveSettings()" />
-            Embaralhar ordem dos grupos a cada envio
+            <input type="checkbox" id="shuffleCheck" checked onchange="saveAllSettings()" />
+            Embaralhar ordem dos grupos
           </label>
         </div>
 
         <button id="startBtn" class="btn-primary" onclick="startBroadcast()">
-          🚀 Disparar Oferta nos Grupos Selecionados (<span id="btnGroupCount">0</span>)
+          🚀 Disparar Ofertas Mescladas (<span id="btnGroupCount">0</span> Grupos)
         </button>
         <button id="stopBtn" class="btn-stop" style="display:none;" onclick="stopBroadcast()">
           🛑 Parar Disparo Imediatamente
         </button>
-
-        <div class="tip-box">
-          💡 <strong>Atalho pelo próprio celular:</strong> Você também pode enviar uma foto com legenda para o seu próprio número começando com <code>#disparar</code> (ex: <code>#disparar 📱 iPhone 17E...</code>) que a VPS dispara automaticamente nos grupos marcados ao lado!
-        </div>
       </div>
 
-      <!-- Coluna Direita: Seleção de Grupos de Vendas + Progresso ao Vivo -->
+      <!-- Coluna Direita: Grupos Ativos + Progresso -->
       <div class="panel">
         <div class="panel-title">
           <span>2. Meus Grupos de Vendas (<span id="selectedCounter">0</span> de <span id="totalActiveCounter">0</span> ativos)</span>
           <button class="btn" onclick="loadGroups(true)" id="refreshGroupsBtn">🔄 Atualizar Grupos</button>
         </div>
-        <p class="panel-sub">Marque os grupos que devem receber as ofertas. Sua seleção fica salva automaticamente na VPS.</p>
+        <p class="panel-sub">Marque os grupos que receberão as ofertas. Sua seleção fica salva na VPS.</p>
 
         <div class="group-toolbar">
           <input type="text" id="groupSearch" class="group-search" placeholder="🔍 Buscar grupo pelo nome..." oninput="renderGroups()" />
-          <button class="btn" style="background:#25d366;color:#0b141a;font-weight:700;" onclick="selectAllGroups(true)">✓ Selecionar Todos</button>
+          <button class="btn" style="background:var(--green);color:#0b141a;font-weight:700;" onclick="selectAllGroups(true)">✓ Selecionar Todos</button>
           <button class="btn" onclick="selectAllGroups(false)">Desmarcar Todos</button>
         </div>
 
         <div class="groups-list" id="groupsList">
-          <div style="padding:24px;text-align:center;color:var(--muted);">Carregando seus grupos do WhatsApp...</div>
+          <div style="padding:24px;text-align:center;color:var(--muted);">Carregando seus grupos...</div>
         </div>
 
-        <!-- Card de Status e Progresso em Tempo Real -->
+        <!-- Progresso em Tempo Real -->
         <div class="progress-card">
           <div style="display:flex;justify-content:space-between;align-items:center;">
-            <strong style="font-size:14px;">📊 Status do Disparador</strong>
+            <strong style="font-size:13.5px;">📊 Progresso do Disparo</strong>
             <span id="campaignCounters" style="font-size:13px;color:var(--green);font-weight:700;">0 / 0 enviados</span>
           </div>
-          <div class="progress-bar-bg">
-            <div class="progress-bar-fill" id="progressBar"></div>
-          </div>
-          <div id="campaignStatusText" style="font-size:13px;color:var(--muted);">
-            Pronto para disparar.
-          </div>
-
+          <div class="progress-bar-bg"><div class="progress-bar-fill" id="progressBar"></div></div>
+          <div id="campaignStatusText" style="font-size:12.5px;color:var(--muted);">Pronto para disparar.</div>
           <div class="logs-box" id="logsBox">
-            <div style="color:var(--muted);">Os registros de envio aparecerão aqui em tempo real...</div>
+            <div style="color:var(--muted);">Os envios aparecerão aqui em tempo real...</div>
           </div>
         </div>
       </div>
@@ -1331,31 +1150,48 @@ app.get(["/", "/qr"], async (req, res) => {
   </div>
 
   <script>
-    let currentImageDataUrl = null;
+    let adsList = [];
+    let currentAdIndex = 0;
     let allGroups = [];
-    let selectedSet = new Set(${JSON.stringify(appConfig.selectedGroups || [])});
+    let selectedSet = new Set();
     let groupsLoadedOnce = false;
 
-    function updatePreview() {
-      const text = document.getElementById('captionInput').value;
-      document.getElementById('bubbleText').innerText = text || '(Sem texto)';
-      const bubbleImg = document.getElementById('bubbleImg');
-      if (currentImageDataUrl) {
-        bubbleImg.src = currentImageDataUrl;
-        bubbleImg.style.display = 'block';
-      } else {
-        bubbleImg.style.display = 'none';
-      }
+    // Gerenciamento de Anúncios e Abas
+    function renderTabs() {
+      const bar = document.getElementById('tabsBar');
+      bar.innerHTML = adsList.map((ad, idx) => {
+        const isActive = idx === currentAdIndex;
+        const hasContent = !!(ad.caption?.trim() || ad.imageBase64);
+        return \`
+          <button class="tab-btn \${isActive ? 'active' : ''} \${hasContent ? 'has-content' : ''}" onclick="switchTab(\${idx})">
+            <span class="tab-dot"></span>
+            \${ad.name || ('Anúncio ' + (idx + 1))} \${!ad.enabled ? '(Pausado)' : ''}
+          </button>
+        \`;
+      }).join('') + \`
+        <button class="btn" onclick="addNewAd()" title="Adicionar mais um anúncio">+ Novo Anúncio</button>
+      \`;
     }
 
-    function setPreviewImage(dataUrl) {
-      currentImageDataUrl = dataUrl;
+    function switchTab(index) {
+      currentAdIndex = index;
+      renderTabs();
+      loadCurrentAdIntoEditor();
+    }
+
+    function loadCurrentAdIntoEditor() {
+      const ad = adsList[currentAdIndex];
+      if (!ad) return;
+      document.getElementById('adNameInput').value = ad.name || '';
+      document.getElementById('adEnabledCheck').checked = !!ad.enabled;
+      document.getElementById('captionInput').value = ad.caption || '';
+
       const placeholder = document.getElementById('uploadPlaceholder');
       const preview = document.getElementById('uploadPreview');
       const previewImg = document.getElementById('previewImg');
 
-      if (dataUrl) {
-        previewImg.src = dataUrl;
+      if (ad.imageBase64) {
+        previewImg.src = ad.imageBase64;
         placeholder.style.display = 'none';
         preview.style.display = 'inline-block';
       } else {
@@ -1363,49 +1199,96 @@ app.get(["/", "/qr"], async (req, res) => {
         placeholder.style.display = 'block';
         preview.style.display = 'none';
       }
-      updatePreview();
+    }
+
+    function onAdFieldChange() {
+      const ad = adsList[currentAdIndex];
+      if (!ad) return;
+      ad.name = document.getElementById('adNameInput').value;
+      ad.enabled = document.getElementById('adEnabledCheck').checked;
+      ad.caption = document.getElementById('captionInput').value;
+      renderTabs();
+      debounceSaveAds();
+    }
+
+    function addNewAd() {
+      const num = adsList.length + 1;
+      adsList.push({
+        id: 'ad_' + Date.now(),
+        name: 'Anúncio ' + num,
+        enabled: true,
+        caption: '',
+        imageBase64: null
+      });
+      switchTab(adsList.length - 1);
+      debounceSaveAds();
     }
 
     function handleFileSelect(e) {
       const file = e.target.files?.[0];
       if (!file) return;
-      readFileAsDataUrl(file);
-    }
-
-    function readFileAsDataUrl(file) {
       const reader = new FileReader();
-      reader.onload = (ev) => setPreviewImage(ev.target.result);
+      reader.onload = (ev) => {
+        const ad = adsList[currentAdIndex];
+        if (ad) {
+          ad.imageBase64 = ev.target.result;
+          loadCurrentAdIntoEditor();
+          renderTabs();
+          debounceSaveAds();
+        }
+      };
       reader.readAsDataURL(file);
     }
 
     function removeImage(e) {
       e.stopPropagation();
       document.getElementById('fileInput').value = '';
-      setPreviewImage(null);
+      const ad = adsList[currentAdIndex];
+      if (ad) {
+        ad.imageBase64 = null;
+        loadCurrentAdIntoEditor();
+        renderTabs();
+        debounceSaveAds();
+      }
     }
 
-    // Suporte para Colar imagem (Ctrl+V) e Arrastar e Soltar
+    // Suporte a colar foto (Ctrl+V)
     window.addEventListener('paste', (e) => {
       const items = e.clipboardData?.items || [];
       for (const item of items) {
         if (item.type.startsWith('image/')) {
           const file = item.getAsFile();
-          if (file) readFileAsDataUrl(file);
+          if (file) {
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+              const ad = adsList[currentAdIndex];
+              if (ad) {
+                ad.imageBase64 = ev.target.result;
+                loadCurrentAdIntoEditor();
+                renderTabs();
+                debounceSaveAds();
+              }
+            };
+            reader.readAsDataURL(file);
+          }
           break;
         }
       }
     });
 
-    const uploadZone = document.getElementById('uploadZone');
-    uploadZone.addEventListener('dragover', (e) => { e.preventDefault(); uploadZone.classList.add('dragover'); });
-    uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('dragover'));
-    uploadZone.addEventListener('drop', (e) => {
-      e.preventDefault();
-      uploadZone.classList.remove('dragover');
-      const file = e.dataTransfer?.files?.[0];
-      if (file && file.type.startsWith('image/')) readFileAsDataUrl(file);
-    });
+    let saveAdsTimeout = null;
+    function debounceSaveAds() {
+      clearTimeout(saveAdsTimeout);
+      saveAdsTimeout = setTimeout(() => {
+        fetch('/ads', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ads: adsList })
+        }).catch(() => {});
+      }, 500);
+    }
 
+    // Gerenciamento de Grupos
     async function loadGroups(forceRefresh = false) {
       const btn = document.getElementById('refreshGroupsBtn');
       if (btn) btn.innerText = '⏳ Buscando...';
@@ -1435,10 +1318,9 @@ app.get(["/", "/qr"], async (req, res) => {
       document.getElementById('btnGroupCount').innerText = selectedSet.size;
 
       if (allGroups.length === 0) {
-        container.innerHTML = '<div style="padding:24px;text-align:center;color:var(--muted);">Nenhum grupo encontrado ainda. Clique em "Atualizar Grupos".</div>';
+        container.innerHTML = '<div style="padding:24px;text-align:center;color:var(--muted);">Nenhum grupo encontrado.</div>';
         return;
       }
-
       if (filtered.length === 0) {
         container.innerHTML = '<div style="padding:24px;text-align:center;color:var(--muted);">Nenhum grupo corresponde à busca.</div>';
         return;
@@ -1462,38 +1344,25 @@ app.get(["/", "/qr"], async (req, res) => {
       if (selectedSet.has(id)) selectedSet.delete(id);
       else selectedSet.add(id);
       renderGroups();
-      saveSettings();
-    }
-
-    function toggleAllFiltered(select) {
-      const query = (document.getElementById('groupSearch').value || '').toLowerCase().trim();
-      const filtered = allGroups.filter(g => g.subject.toLowerCase().includes(query));
-      for (const g of filtered) {
-        if (select) selectedSet.add(g.id);
-        else selectedSet.delete(g.id);
-      }
-      renderGroups();
-      saveSettings();
+      saveAllSettings();
     }
 
     function selectAllGroups(select) {
       if (select) {
-        for (const g of allGroups) {
-          selectedSet.add(g.id);
-        }
+        for (const g of allGroups) selectedSet.add(g.id);
       } else {
         selectedSet.clear();
       }
       renderGroups();
-      saveSettings();
+      saveAllSettings();
     }
 
-    async function saveSettings() {
+    async function saveAllSettings() {
       const minDelaySec = parseInt(document.getElementById('minDelayInput').value, 10) || 15;
       const maxDelaySec = parseInt(document.getElementById('maxDelayInput').value, 10) || 30;
       const simulateTyping = document.getElementById('typingCheck').checked;
       const shuffleGroups = document.getElementById('shuffleCheck').checked;
-      const lastCaption = document.getElementById('captionInput').value;
+      const rotationMode = document.getElementById('rotationModeSelect').value;
 
       await fetch('/config', {
         method: 'POST',
@@ -1504,19 +1373,19 @@ app.get(["/", "/qr"], async (req, res) => {
           maxDelaySec,
           simulateTyping,
           shuffleGroups,
-          lastCaption
+          rotationMode
         })
       }).catch(() => {});
     }
 
     async function startBroadcast() {
       if (selectedSet.size === 0) {
-        alert('Selecione pelo menos 1 grupo de vendas na lista ao lado!');
+        alert('Selecione pelo menos 1 grupo na lista ao lado!');
         return;
       }
-      const caption = document.getElementById('captionInput').value;
-      if (!caption.trim() && !currentImageDataUrl) {
-        alert('Adicione uma foto ou escreva a descrição da oferta!');
+      const activeAds = adsList.filter(a => a.enabled && (a.caption?.trim() || a.imageBase64));
+      if (activeAds.length === 0) {
+        alert('Preencha e ative pelo menos 1 anúncio com foto ou texto para disparar!');
         return;
       }
 
@@ -1524,6 +1393,7 @@ app.get(["/", "/qr"], async (req, res) => {
       const maxDelaySec = parseInt(document.getElementById('maxDelayInput').value, 10) || 30;
       const simulateTyping = document.getElementById('typingCheck').checked;
       const shuffleGroups = document.getElementById('shuffleCheck').checked;
+      const rotationMode = document.getElementById('rotationModeSelect').value;
 
       const btn = document.getElementById('startBtn');
       btn.disabled = true;
@@ -1533,18 +1403,18 @@ app.get(["/", "/qr"], async (req, res) => {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            caption,
-            imageBase64: currentImageDataUrl,
+            ads: adsList,
             selectedGroups: Array.from(selectedSet),
             minDelaySec,
             maxDelaySec,
             simulateTyping,
-            shuffleGroups
+            shuffleGroups,
+            rotationMode
           })
         });
         const data = await res.json();
         if (!data.success) {
-          alert('Erro: ' + (data.error || 'Falha ao iniciar disparo'));
+          alert('Erro: ' + (data.error || 'Falha ao iniciar'));
           btn.disabled = false;
         } else {
           pollStatus();
@@ -1561,7 +1431,7 @@ app.get(["/", "/qr"], async (req, res) => {
     }
 
     async function resetSession() {
-      if (!confirm('Tem certeza que deseja desconectar o WhatsApp atual e gerar um novo QR Code?')) return;
+      if (!confirm('Desconectar o WhatsApp atual e gerar novo QR Code?')) return;
       await fetch('/reset', { method: 'POST' });
       setTimeout(pollStatus, 1200);
     }
@@ -1583,11 +1453,19 @@ app.get(["/", "/qr"], async (req, res) => {
           sub.innerText = (data.name || 'Cledson') + ' • Sessão Ativa na VPS';
           qrSec.style.display = 'none';
           appSec.style.display = 'grid';
+
+          if (adsList.length === 0 && Array.isArray(data.ads)) {
+            adsList = data.ads;
+            renderTabs();
+            loadCurrentAdIntoEditor();
+          }
+          if (data.config?.rotationMode) {
+            document.getElementById('rotationModeSelect').value = data.config.rotationMode;
+          }
           if (!groupsLoadedOnce) loadGroups(false);
         } else {
           pill.className = 'status-pill wait';
-          pill.innerHTML = '📲 Aguardando Conexão QR Code';
-          sub.innerText = 'Escaneie o QR Code para liberar o disparador';
+          pill.innerHTML = '📲 Conectar via QR Code';
           qrSec.style.display = 'block';
           appSec.style.display = 'none';
           if (data.hasQr && data.qrCodeDataUrl) {
@@ -1597,7 +1475,6 @@ app.get(["/", "/qr"], async (req, res) => {
           }
         }
 
-        // Atualizar progresso do disparador
         if (data.campaign) {
           const c = data.campaign;
           const startBtn = document.getElementById('startBtn');
@@ -1629,7 +1506,6 @@ app.get(["/", "/qr"], async (req, res) => {
       }
     }
 
-    updatePreview();
     pollStatus();
     setInterval(pollStatus, 2000);
   </script>
@@ -1637,7 +1513,7 @@ app.get(["/", "/qr"], async (req, res) => {
 </html>`);
 });
 
-// POST /send — envia mensagem individual via API
+// POST /send
 app.post("/send", async (req, res) => {
   const key = req.headers["x-api-key"] || req.query.key;
   if (key && key !== API_SECRET) return res.status(401).json({ error: "Unauthorized" });
