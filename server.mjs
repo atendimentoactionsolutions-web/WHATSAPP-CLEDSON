@@ -1647,8 +1647,8 @@ app.get(["/", "/qr"], async (req, res) => {
       const badge = document.getElementById('galleryBadge');
       if (badge) {
         const activeCount = adsList.filter(a => a.enabled).length;
-        badge.innerText = `${activeCount} / ${adsList.length}`;
-        badge.title = `${activeCount} anúncios marcados para disparo de um total de ${adsList.length} salvos`;
+        badge.innerText = activeCount + ' / ' + adsList.length;
+        badge.title = activeCount + ' anúncios marcados para disparo de um total de ' + adsList.length + ' salvos';
       }
     }
 
