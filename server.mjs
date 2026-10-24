@@ -896,27 +896,40 @@ app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 // GET /invites — grupos descobertos nas conversas que o usuário ainda não participa
 app.get("/invites", async (req, res) => {
   const currentGroupIds = new Set(cachedGroups.map((g) => g.id));
-  const invitesList = Array.from(detectedInvites.values());
+  const invitesList = Array.from(detectedInvites.values()).slice(-100).reverse();
   const resolved = [];
 
   for (const inv of invitesList) {
-    let groupMeta = null;
+    let groupMeta = inv.groupMeta || null;
     let alreadyIn = false;
 
-    if (waSocket && waStatus === "CONNECTED") {
+    if (!groupMeta && waSocket && waStatus === "CONNECTED") {
       try {
-        groupMeta = await waSocket.groupGetInviteInfo(inv.code);
-        if (groupMeta && groupMeta.id) {
-          alreadyIn = currentGroupIds.has(groupMeta.id);
+        groupMeta = await Promise.race([
+          waSocket.groupGetInviteInfo(inv.code),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 2000))
+        ]);
+        if (groupMeta) {
+          inv.groupMeta = {
+            id: groupMeta.id,
+            subject: groupMeta.subject,
+            size: groupMeta.size || (groupMeta.participants ? groupMeta.participants.length : 0),
+            desc: groupMeta.desc || "",
+          };
+          saveRadarInvites();
         }
       } catch (e) {
         groupMeta = { error: e.message || "Inválido ou expirado" };
       }
     }
 
+    if (groupMeta && groupMeta.id) {
+      alreadyIn = currentGroupIds.has(groupMeta.id);
+    }
+
     resolved.push({
       ...inv,
-      groupMeta,
+      groupMeta: groupMeta || inv.groupMeta,
       alreadyIn,
     });
   }
@@ -1151,7 +1164,7 @@ app.get(["/", "/qr"], async (req, res) => {
       min-height: 100vh;
       padding: 20px;
     }
-    .container { max-width: 1280px; margin: 0 auto; }
+    .container { max-width: 1200px; margin: 0 auto; width: 100%; }
     header {
       display: flex;
       flex-wrap: wrap;
@@ -1229,17 +1242,17 @@ app.get(["/", "/qr"], async (req, res) => {
     .nav-tab.active { background: #222e35; color: #fff; }
     .radar-card {
       background: var(--card-2); border: 1px solid var(--border); border-radius: 14px;
-      padding: 16px 20px; display: flex; align-items: center; justify-content: space-between;
-      gap: 16px; transition: 0.15s;
+      padding: 14px 18px; display: flex; align-items: center; justify-content: space-between;
+      gap: 14px; transition: 0.15s; width: 100%; box-sizing: border-box; overflow: hidden;
     }
     .radar-card:hover { border-color: rgba(37, 211, 102, 0.4); background: rgba(255,255,255,0.02); }
-    .radar-name { font-size: 15px; font-weight: 700; color: #fff; margin-bottom: 4px; }
-    .radar-desc { font-size: 12.5px; color: var(--muted); line-height: 1.4; max-width: 600px; }
-    .radar-origin { font-size: 11.5px; color: #38bdf8; margin-top: 6px; }
+    .radar-name { font-size: 14px; font-weight: 700; color: #fff; margin-bottom: 3px; word-break: break-word; white-space: normal; }
+    .radar-desc { font-size: 12px; color: var(--muted); line-height: 1.4; word-break: break-word; white-space: normal; }
+    .radar-origin { font-size: 11px; color: #38bdf8; margin-top: 4px; word-break: break-word; white-space: normal; }
     .radar-join-btn {
-      background: var(--green); color: #0b141a; border: none; padding: 10px 18px;
-      border-radius: 10px; font-size: 13px; font-weight: 700; text-decoration: none;
-      white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+      background: var(--green); color: #0b141a; border: none; padding: 9px 16px;
+      border-radius: 10px; font-size: 12.5px; font-weight: 700; text-decoration: none;
+      white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; flex-shrink: 0;
     }
     .radar-join-btn:hover { background: var(--green-dark); }
     .tabs-bar {
