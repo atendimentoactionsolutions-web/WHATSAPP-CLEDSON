@@ -1361,6 +1361,29 @@ app.get(["/", "/qr"], async (req, res) => {
     }
     .group-meta { font-size: 12px; color: var(--muted); white-space: nowrap; }
 
+    /* Modal de Edição de Anúncio */
+    .modal-overlay {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0, 0, 0, 0.75); z-index: 9999;
+      display: flex; align-items: center; justify-content: center;
+      padding: 16px; backdrop-filter: blur(4px);
+    }
+    .modal-card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 18px; width: 100%; max-width: 580px;
+      max-height: 90vh; overflow-y: auto; padding: 24px;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.6);
+    }
+    .modal-header {
+      display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px;
+    }
+    .modal-title { font-size: 17px; font-weight: 700; color: #fff; }
+    .close-modal-btn {
+      background: transparent; border: none; color: var(--muted);
+      font-size: 20px; cursor: pointer; padding: 4px 8px; border-radius: 6px;
+    }
+    .close-modal-btn:hover { color: #fff; background: var(--card-2); }
+
     /* Estilos do Banco de Anúncios / Galeria */
     .gallery-grid {
       display: grid;
@@ -1673,6 +1696,58 @@ app.get(["/", "/qr"], async (req, res) => {
     </div>
   </div>
 
+  <!-- MODAL PARA EDITAR / CRIAR ANÚNCIO DIRETO NA GALERIA -->
+  <div id="editAdModal" class="modal-overlay" style="display:none;">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div class="modal-title" id="modalTitle">✏️ Editar Anúncio</div>
+        <button class="close-modal-btn" onclick="closeEditModal()">✕</button>
+      </div>
+
+      <div style="margin-bottom:14px;">
+        <label style="font-size:12.5px;font-weight:600;color:#d1d7db;display:block;margin-bottom:6px;">
+          🏷️ Nome / Identificador do Anúncio (ex: iPhone 13 PM, 17E Lacrado, iPad)
+        </label>
+        <input type="text" id="modalAdName" class="ad-name-input" style="width:100%;" placeholder="Nome do Anúncio" />
+      </div>
+
+      <div style="margin-bottom:14px;">
+        <label style="font-size:12.5px;font-weight:600;color:#d1d7db;display:block;margin-bottom:6px;">
+          📸 Foto do Anúncio
+        </label>
+        <div class="upload-zone" id="modalUploadZone" onclick="document.getElementById('modalFileInput').click()">
+          <input type="file" id="modalFileInput" accept="image/*" onchange="handleModalFileSelect(event)" />
+          <div id="modalUploadPlaceholder">
+            <div style="font-size:26px;margin-bottom:4px;">🖼️</div>
+            <div style="font-size:13px;font-weight:600;color:#fff;">Clique para adicionar foto ou cole (Ctrl+V)</div>
+          </div>
+          <div id="modalUploadPreview" class="preview-container" style="display:none;">
+            <img id="modalPreviewImg" src="" alt="Foto" />
+            <button type="button" class="remove-img-btn" onclick="removeModalImage(event)">🗑️ Remover Foto</button>
+          </div>
+        </div>
+      </div>
+
+      <div style="margin-bottom:14px;">
+        <label style="font-size:12.5px;font-weight:600;color:#d1d7db;display:block;margin-bottom:6px;">
+          📝 Texto / Legenda Completa
+        </label>
+        <textarea id="modalCaptionInput" placeholder="Cole ou digite a descrição do anúncio..." style="min-height:160px;margin-bottom:4px;"></textarea>
+      </div>
+
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-top:16px;">
+        <label class="select-tag">
+          <input type="checkbox" id="modalAdEnabledCheck" checked />
+          <span>✅ Incluir este anúncio no Disparo</span>
+        </label>
+        <div style="display:flex;gap:8px;">
+          <button class="btn" onclick="closeEditModal()">Cancelar</button>
+          <button class="btn" style="background:var(--green);color:#0b141a;font-weight:700;" onclick="saveAdFromModal()">💾 Salvar Anúncio</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script>
     let currentMainView = 'disparo'; // 'disparo' | 'galeria' | 'radar'
     let radarInvitesList = [];
@@ -1789,23 +1864,113 @@ app.get(["/", "/qr"], async (req, res) => {
       }
     }
 
-    function editAdFromGallery(index) {
-      currentAdIndex = index;
-      switchMainView('disparo');
+    let editingAdId = null;
+    let modalImageData = null;
+
+    function openEditModal(adId) {
+      editingAdId = adId;
+      const modal = document.getElementById('editAdModal');
+      const title = document.getElementById('modalTitle');
+      const nameInput = document.getElementById('modalAdName');
+      const captionInput = document.getElementById('modalCaptionInput');
+      const enabledCheck = document.getElementById('modalAdEnabledCheck');
+      const previewImg = document.getElementById('modalPreviewImg');
+      const preview = document.getElementById('modalUploadPreview');
+      const placeholder = document.getElementById('modalUploadPlaceholder');
+
+      if (adId) {
+        const ad = adsList.find(a => a.id === adId);
+        if (!ad) return;
+        title.innerText = '✏️ Editar Anúncio (' + (ad.name || 'Sem nome') + ')';
+        nameInput.value = ad.name || '';
+        captionInput.value = ad.caption || '';
+        enabledCheck.checked = !!ad.enabled;
+        modalImageData = ad.imageBase64 || null;
+      } else {
+        title.innerText = '➕ Criar Novo Anúncio';
+        nameInput.value = 'Anúncio ' + (adsList.length + 1);
+        captionInput.value = '';
+        enabledCheck.checked = true;
+        modalImageData = null;
+      }
+
+      if (modalImageData) {
+        previewImg.src = modalImageData;
+        placeholder.style.display = 'none';
+        preview.style.display = 'inline-block';
+      } else {
+        previewImg.src = '';
+        placeholder.style.display = 'block';
+        preview.style.display = 'none';
+      }
+
+      modal.style.display = 'flex';
     }
 
-    function deleteAdFromGallery(id) {
-      if (!confirm('Tem certeza que deseja apagar este anúncio do seu banco?')) return;
-      adsList = adsList.filter(a => a.id !== id);
-      if (currentAdIndex >= adsList.length) currentAdIndex = Math.max(0, adsList.length - 1);
+    function closeEditModal() {
+      document.getElementById('editAdModal').style.display = 'none';
+      editingAdId = null;
+      modalImageData = null;
+    }
+
+    function handleModalFileSelect(e) {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        modalImageData = ev.target.result;
+        document.getElementById('modalPreviewImg').src = modalImageData;
+        document.getElementById('modalUploadPlaceholder').style.display = 'none';
+        document.getElementById('modalUploadPreview').style.display = 'inline-block';
+      };
+      reader.readAsDataURL(file);
+    }
+
+    function removeModalImage(e) {
+      e.stopPropagation();
+      document.getElementById('modalFileInput').value = '';
+      modalImageData = null;
+      document.getElementById('modalPreviewImg').src = '';
+      document.getElementById('modalUploadPlaceholder').style.display = 'block';
+      document.getElementById('modalUploadPreview').style.display = 'none';
+    }
+
+    function saveAdFromModal() {
+      const name = document.getElementById('modalAdName').value.trim() || 'Anúncio';
+      const caption = document.getElementById('modalCaptionInput').value;
+      const enabled = document.getElementById('modalAdEnabledCheck').checked;
+
+      if (editingAdId) {
+        const ad = adsList.find(a => a.id === editingAdId);
+        if (ad) {
+          ad.name = name;
+          ad.caption = caption;
+          ad.enabled = enabled;
+          ad.imageBase64 = modalImageData;
+        }
+      } else {
+        adsList.push({
+          id: 'ad_' + Date.now(),
+          name,
+          caption,
+          enabled,
+          imageBase64: modalImageData
+        });
+      }
+
+      closeEditModal();
       renderTabs();
       renderGalleryGrid();
       debounceSaveAds();
     }
 
+    function editAdFromGallery(index) {
+      const ad = adsList[index];
+      if (ad) openEditModal(ad.id);
+    }
+
     function createAdInGallery() {
-      addNewAd();
-      switchMainView('disparo');
+      openEditModal(null);
     }
 
     async function loadRadarInvites() {
