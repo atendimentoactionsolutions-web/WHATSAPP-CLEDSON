@@ -1240,19 +1240,27 @@ app.get(["/", "/qr"], async (req, res) => {
     }
     .nav-tab:hover { color: #fff; }
     .nav-tab.active { background: #222e35; color: #fff; }
+    .radar-grid {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      width: 100%;
+    }
     .radar-card {
       background: var(--card-2); border: 1px solid var(--border); border-radius: 14px;
-      padding: 14px 18px; display: flex; align-items: center; justify-content: space-between;
-      gap: 14px; transition: 0.15s; width: 100%; box-sizing: border-box; overflow: hidden;
+      padding: 14px 18px; display: flex; flex-direction: row; align-items: center; justify-content: space-between;
+      gap: 16px; transition: 0.15s; width: 100%; box-sizing: border-box;
     }
     .radar-card:hover { border-color: rgba(37, 211, 102, 0.4); background: rgba(255,255,255,0.02); }
-    .radar-name { font-size: 14px; font-weight: 700; color: #fff; margin-bottom: 3px; word-break: break-word; white-space: normal; }
-    .radar-desc { font-size: 12px; color: var(--muted); line-height: 1.4; word-break: break-word; white-space: normal; }
-    .radar-origin { font-size: 11px; color: #38bdf8; margin-top: 4px; word-break: break-word; white-space: normal; }
+    .radar-card-content { flex: 1 1 auto; min-width: 0; }
+    .radar-name { font-size: 14.5px; font-weight: 700; color: #fff; margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; }
+    .radar-desc { font-size: 12px; color: var(--muted); line-height: 1.45; max-height: 48px; overflow: hidden; text-overflow: ellipsis; }
+    .radar-origin { font-size: 11px; color: #38bdf8; margin-top: 4px; }
+    .radar-card-action { flex: 0 0 auto; }
     .radar-join-btn {
       background: var(--green); color: #0b141a; border: none; padding: 9px 16px;
       border-radius: 10px; font-size: 12.5px; font-weight: 700; text-decoration: none;
-      white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; flex-shrink: 0;
+      white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
     }
     .radar-join-btn:hover { background: var(--green-dark); }
     .tabs-bar {
@@ -1701,7 +1709,7 @@ app.get(["/", "/qr"], async (req, res) => {
         <input type="text" id="radarSearch" class="group-search" placeholder="🔍 Filtrar por nome (ex: rolo, desapego, zona leste)..." oninput="renderRadarList()" />
       </div>
 
-      <div id="radarList" style="display:flex;flex-direction:column;gap:12px;">
+      <div id="radarList" class="radar-grid">
         <div style="padding:40px;text-align:center;color:var(--muted);">
           Monitorando mensagens recebidas... Novos convites aparecerão aqui automaticamente!
         </div>
@@ -2045,12 +2053,12 @@ app.get(["/", "/qr"], async (req, res) => {
 
         return \`
           <div class="radar-card">
-            <div style="flex:1;min-width:0;">
+            <div class="radar-card-content">
               <div class="radar-name">\${title} <span style="font-size:12px;color:var(--green);font-weight:600;margin-left:8px;">👥 \${size}</span></div>
               <div class="radar-desc">\${desc.slice(0, 180)}</div>
               \${origin ? '<div class="radar-origin">📍 ' + origin + '</div>' : ''}
             </div>
-            <div>
+            <div class="radar-card-action">
               <a href="\${inv.url}" target="_blank" rel="noopener noreferrer" class="radar-join-btn">
                 🔗 Entrar pelo WhatsApp
               </a>
