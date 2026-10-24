@@ -30,6 +30,7 @@ const logger = pino({ level: "silent" });
 // ─── Persistência de Configuração e Anúncios Múltiplos ───
 const defaultConfig = {
   selectedGroups: [],
+  hiddenGroups: [],
   minDelaySec: 15,
   maxDelaySec: 30,
   shuffleGroups: true,
@@ -78,7 +79,12 @@ function loadConfig() {
   try {
     if (fs.existsSync(CONFIG_FILE)) {
       const parsed = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf-8"));
-      return { ...defaultConfig, ...parsed };
+      const cfg = { ...defaultConfig, ...parsed };
+      if (!Array.isArray(cfg.hiddenGroups)) cfg.hiddenGroups = [];
+      if (!Array.isArray(cfg.selectedGroups)) cfg.selectedGroups = [];
+      const hiddenSet = new Set(cfg.hiddenGroups);
+      cfg.selectedGroups = cfg.selectedGroups.filter((id) => !hiddenSet.has(id));
+      return cfg;
     }
   } catch (e) {
     console.error("Erro ao carregar config.json:", e);
@@ -450,8 +456,13 @@ async function startHumanBroadcast({ targetGroupIds, source = "Painel Web" }) {
   if (!waSocket || waStatus !== "CONNECTED") {
     throw new Error("WhatsApp não está conectado no momento.");
   }
-  if (!targetGroupIds || targetGroupIds.length === 0) {
-    throw new Error("Selecione pelo menos 1 grupo de vendas para disparar.");
+
+  // BLINDAGEM MÁXIMA: Garante que grupos ocultos NUNCA recebam mensagens
+  const hiddenSet = new Set(appConfig.hiddenGroups || []);
+  const safeTargetGroupIds = (targetGroupIds || []).filter((id) => !hiddenSet.has(id));
+
+  if (!safeTargetGroupIds || safeTargetGroupIds.length === 0) {
+    throw new Error("Selecione pelo menos 1 grupo ativo para disparar (grupos ocultos nunca recebem anúncios).");
   }
 
   // Filtra apenas anúncios ativos que tenham texto ou foto
@@ -468,8 +479,9 @@ async function startHumanBroadcast({ targetGroupIds, source = "Painel Web" }) {
   }
   const groupMap = new Map(cachedGroups.map((g) => [g.id, g.subject]));
 
-  const orderedIds = appConfig.shuffleGroups ? shuffleArray(targetGroupIds) : [...targetGroupIds];
+  const orderedIds = appConfig.shuffleGroups ? shuffleArray(safeTargetGroupIds) : [...safeTargetGroupIds];
 
+  const ignoredHiddenCount = (targetGroupIds || []).length - safeTargetGroupIds.length;
   campaignState = {
     isRunning: true,
     isPaused: false,
@@ -490,7 +502,9 @@ async function startHumanBroadcast({ targetGroupIds, source = "Painel Web" }) {
   addCampaignLog(
     "Sistema",
     "INFO",
-    `Disparo iniciado (${orderedIds.length} grupos) • Mesclando ${activeAds.length} anúncio(s) [${activeAds.map((a) => a.name).join(", ")}]`
+    `Disparo iniciado (${orderedIds.length} grupos)` +
+      (ignoredHiddenCount > 0 ? ` [${ignoredHiddenCount} ocultos protegidos]` : "") +
+      ` • Mesclando ${activeAds.length} anúncio(s) [${activeAds.map((a) => a.name).join(", ")}]`
   );
 
   // Executa em segundo plano
@@ -812,20 +826,23 @@ async function initWhatsApp(forceReset = false) {
           }
 
           if (/^#disparar\b/i.test(trimmed)) {
-            if (!appConfig.selectedGroups || appConfig.selectedGroups.length === 0) {
+            const hiddenSet = new Set(appConfig.hiddenGroups || []);
+            const validGroups = (appConfig.selectedGroups || []).filter((id) => !hiddenSet.has(id));
+
+            if (validGroups.length === 0) {
               await sock.sendMessage(remoteJid, {
-                text: "⚠️ Nenhum grupo de vendas selecionado! Acesse o Painel Web da VPS para marcar os grupos.",
+                text: "⚠️ Nenhum grupo de vendas ativo selecionado! Acesse o Painel Web da VPS para marcar os grupos.",
               });
               continue;
             }
 
             try {
               await startHumanBroadcast({
-                targetGroupIds: appConfig.selectedGroups,
+                targetGroupIds: validGroups,
                 source: "Comando WhatsApp (#disparar)",
               });
               await sock.sendMessage(remoteJid, {
-                text: `🚀 *Disparo Humano Mesclado Iniciado!*\n\n📦 *Grupos selecionados:* ${appConfig.selectedGroups.length}\n🎯 *Modo de rotação:* ${appConfig.rotationMode}\n⏱️ *Intervalo Anti-Ban:* ${appConfig.minDelaySec}s a ${appConfig.maxDelaySec}s\n\n_(Envie *#parar* a qualquer momento para cancelar)_`,
+                text: `🚀 *Disparo Humano Mesclado Iniciado!*\n\n📦 *Grupos ativos:* ${validGroups.length}\n🎯 *Modo de rotação:* ${appConfig.rotationMode}\n⏱️ *Intervalo Anti-Ban:* ${appConfig.minDelaySec}s a ${appConfig.maxDelaySec}s\n🔒 *Grupos ocultos:* ${appConfig.hiddenGroups?.length || 0} (blindados contra disparos)\n\n_(Envie *#parar* a qualquer momento para cancelar)_`,
               });
             } catch (err) {
               await sock.sendMessage(remoteJid, { text: `❌ Erro ao iniciar disparo: ${err.message}` });
@@ -987,7 +1004,8 @@ app.get("/groups", async (req, res) => {
   }
   res.json({
     groups: cachedGroups,
-    selectedGroups: appConfig.selectedGroups,
+    selectedGroups: appConfig.selectedGroups || [],
+    hiddenGroups: appConfig.hiddenGroups || [],
   });
 });
 
@@ -1031,6 +1049,7 @@ app.post("/groups/leave", async (req, res) => {
 
     cachedGroups = cachedGroups.filter((g) => g.id !== jid);
     appConfig.selectedGroups = (appConfig.selectedGroups || []).filter((id) => id !== jid);
+    appConfig.hiddenGroups = (appConfig.hiddenGroups || []).filter((id) => id !== jid);
 
     results.push({ jid, name: groupName, leftOk, deletedOk, error: errorMsg });
     await delay(1000);
@@ -1043,8 +1062,14 @@ app.post("/groups/leave", async (req, res) => {
 
 // POST /config
 app.post("/config", (req, res) => {
-  const { selectedGroups, minDelaySec, maxDelaySec, shuffleGroups, simulateTyping, rotationMode } = req.body;
-  if (Array.isArray(selectedGroups)) appConfig.selectedGroups = selectedGroups;
+  const { selectedGroups, hiddenGroups, minDelaySec, maxDelaySec, shuffleGroups, simulateTyping, rotationMode } = req.body;
+  if (Array.isArray(hiddenGroups)) {
+    appConfig.hiddenGroups = hiddenGroups;
+  }
+  if (Array.isArray(selectedGroups)) {
+    const hiddenSet = new Set(appConfig.hiddenGroups || []);
+    appConfig.selectedGroups = selectedGroups.filter((id) => !hiddenSet.has(id));
+  }
   if (typeof minDelaySec === "number" && minDelaySec >= 5) appConfig.minDelaySec = minDelaySec;
   if (typeof maxDelaySec === "number" && maxDelaySec >= appConfig.minDelaySec) appConfig.maxDelaySec = maxDelaySec;
   if (typeof shuffleGroups === "boolean") appConfig.shuffleGroups = shuffleGroups;
@@ -1069,13 +1094,17 @@ app.post("/ads", (req, res) => {
 // POST /broadcast — dispara a rotação mesclada nos grupos
 app.post("/broadcast", async (req, res) => {
   try {
-    const { ads, selectedGroups, minDelaySec, maxDelaySec, shuffleGroups, simulateTyping, rotationMode } = req.body;
+    const { ads, selectedGroups, hiddenGroups, minDelaySec, maxDelaySec, shuffleGroups, simulateTyping, rotationMode } = req.body;
 
     if (Array.isArray(ads)) {
       appAds = ads;
       saveAds();
     }
-    if (Array.isArray(selectedGroups)) appConfig.selectedGroups = selectedGroups;
+    if (Array.isArray(hiddenGroups)) appConfig.hiddenGroups = hiddenGroups;
+    if (Array.isArray(selectedGroups)) {
+      const hiddenSet = new Set(appConfig.hiddenGroups || []);
+      appConfig.selectedGroups = selectedGroups.filter((id) => !hiddenSet.has(id));
+    }
     if (typeof minDelaySec === "number" && minDelaySec >= 5) appConfig.minDelaySec = minDelaySec;
     if (typeof maxDelaySec === "number" && maxDelaySec >= appConfig.minDelaySec) appConfig.maxDelaySec = maxDelaySec;
     if (typeof shuffleGroups === "boolean") appConfig.shuffleGroups = shuffleGroups;
@@ -1369,18 +1398,31 @@ app.get(["/", "/qr"], async (req, res) => {
       border-radius: 12px; background: var(--card-2);
     }
     .group-item {
-      display: flex; align-items: center; justify-content: space-between;
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
       padding: 10px 14px; border-bottom: 1px solid var(--border); cursor: pointer; transition: 0.15s;
     }
     .group-item:last-child { border-bottom: none; }
     .group-item:hover { background: rgba(255,255,255,0.03); }
     .group-item.selected { background: rgba(37, 211, 102, 0.08); }
-    .group-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
-    .group-left input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--green); cursor: pointer; }
+    .group-left { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; }
+    .group-left input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--green); cursor: pointer; flex-shrink: 0; }
     .group-name {
-      font-size: 13.5px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 240px;
+      font-size: 13.5px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 230px;
     }
+    .group-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
     .group-meta { font-size: 12px; color: var(--muted); white-space: nowrap; }
+    .btn-hide-group {
+      background: rgba(239, 68, 68, 0.12); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.25);
+      font-size: 11.5px; font-weight: 600; padding: 4px 8px; border-radius: 6px; cursor: pointer; transition: 0.15s;
+      display: inline-flex; align-items: center; gap: 4px;
+    }
+    .btn-hide-group:hover { background: #ef4444; color: #fff; border-color: #ef4444; }
+    .btn-unhide-group {
+      background: rgba(56, 189, 248, 0.12); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.25);
+      font-size: 11.5px; font-weight: 600; padding: 4px 8px; border-radius: 6px; cursor: pointer; transition: 0.15s;
+      display: inline-flex; align-items: center; gap: 4px;
+    }
+    .btn-unhide-group:hover { background: #38bdf8; color: #0b141a; border-color: #38bdf8; }
 
     /* Modal de Edição de Anúncio */
     .modal-overlay {
@@ -1645,12 +1687,29 @@ app.get(["/", "/qr"], async (req, res) => {
           <span>2. Meus Grupos de Vendas (<span id="selectedCounter">0</span> de <span id="totalActiveCounter">0</span> ativos)</span>
           <button class="btn" onclick="loadGroups(true)" id="refreshGroupsBtn">🔄 Atualizar Grupos</button>
         </div>
-        <p class="panel-sub">Marque os grupos que receberão as ofertas. Sua seleção fica salva na VPS.</p>
+        <p class="panel-sub">Marque os grupos que receberão as ofertas. Grupos pessoais ou sensíveis podem ser <strong>Ocultados</strong> para nunca receberem mensagens.</p>
 
-        <div class="group-toolbar">
-          <input type="text" id="groupSearch" class="group-search" placeholder="🔍 Buscar grupo pelo nome..." oninput="renderGroups()" />
+        <!-- Sub-abas: Grupos Ativos vs Ocultos -->
+        <div style="display:flex;gap:6px;margin-bottom:12px;background:var(--card-2);padding:4px;border-radius:10px;border:1px solid var(--border);">
+          <button id="groupTabActive" class="nav-tab active" style="flex:1;padding:8px 10px;font-size:12.5px;font-weight:700;" onclick="setGroupFilter('active')">
+            📢 Grupos Ativos (<span id="activeGroupsCount">0</span>)
+          </button>
+          <button id="groupTabHidden" class="nav-tab" style="flex:1;padding:8px 10px;font-size:12.5px;font-weight:700;" onclick="setGroupFilter('hidden')">
+            🔒 Ocultos / Bloqueados (<span id="hiddenGroupsCount">0</span>)
+          </button>
+        </div>
+
+        <!-- Toolbar para Grupos Ativos -->
+        <div class="group-toolbar" id="activeGroupsToolbar">
+          <input type="text" id="groupSearch" class="group-search" placeholder="🔍 Buscar grupo ativo pelo nome..." oninput="renderGroups()" />
           <button class="btn" style="background:var(--green);color:#0b141a;font-weight:700;" onclick="selectAllGroups(true)">✓ Selecionar Todos</button>
           <button class="btn" onclick="selectAllGroups(false)">Desmarcar Todos</button>
+        </div>
+
+        <!-- Toolbar para Grupos Ocultos -->
+        <div class="group-toolbar" id="hiddenGroupsToolbar" style="display:none;">
+          <input type="text" id="hiddenGroupSearch" class="group-search" placeholder="🔍 Buscar nos grupos ocultos..." oninput="renderGroups()" />
+          <button class="btn" style="background:#38bdf8;color:#0b141a;font-weight:700;" onclick="unhideAllGroups()">👁️ Reexibir Todos</button>
         </div>
 
         <div class="groups-list" id="groupsList">
@@ -2072,6 +2131,8 @@ app.get(["/", "/qr"], async (req, res) => {
     let currentAdIndex = 0;
     let allGroups = [];
     let selectedSet = new Set();
+    let hiddenSet = new Set();
+    let currentGroupFilter = 'active';
     let groupsLoadedOnce = false;
 
     // Gerenciamento de Anúncios e Abas (Mostra apenas os selecionados para disparo)
@@ -2230,6 +2291,28 @@ app.get(["/", "/qr"], async (req, res) => {
     }
 
     // Gerenciamento de Grupos
+    function setGroupFilter(filter) {
+      currentGroupFilter = filter;
+      const tabActive = document.getElementById('groupTabActive');
+      const tabHidden = document.getElementById('groupTabHidden');
+      if (tabActive && tabHidden) {
+        if (filter === 'active') {
+          tabActive.classList.add('active');
+          tabHidden.classList.remove('active');
+        } else {
+          tabActive.classList.remove('active');
+          tabHidden.classList.add('active');
+        }
+      }
+      const activeToolbar = document.getElementById('activeGroupsToolbar');
+      const hiddenToolbar = document.getElementById('hiddenGroupsToolbar');
+      if (activeToolbar && hiddenToolbar) {
+        activeToolbar.style.display = filter === 'active' ? 'flex' : 'none';
+        hiddenToolbar.style.display = filter === 'hidden' ? 'flex' : 'none';
+      }
+      renderGroups();
+    }
+
     async function loadGroups(forceRefresh = false) {
       const btn = document.getElementById('refreshGroupsBtn');
       if (btn) btn.innerText = '⏳ Buscando...';
@@ -2237,8 +2320,9 @@ app.get(["/", "/qr"], async (req, res) => {
         const res = await fetch('/groups' + (forceRefresh ? '?refresh=1' : ''));
         const data = await res.json();
         allGroups = data.groups || [];
+        hiddenSet = new Set(Array.isArray(data.hiddenGroups) ? data.hiddenGroups : []);
         if (Array.isArray(data.selectedGroups) && !groupsLoadedOnce) {
-          selectedSet = new Set(data.selectedGroups);
+          selectedSet = new Set(data.selectedGroups.filter(id => !hiddenSet.has(id)));
         }
         groupsLoadedOnce = true;
         renderGroups();
@@ -2251,46 +2335,133 @@ app.get(["/", "/qr"], async (req, res) => {
 
     function renderGroups() {
       const container = document.getElementById('groupsList');
-      const query = (document.getElementById('groupSearch').value || '').toLowerCase().trim();
-      const filtered = allGroups.filter(g => g.subject.toLowerCase().includes(query));
+      const searchInput = currentGroupFilter === 'active' 
+        ? document.getElementById('groupSearch') 
+        : document.getElementById('hiddenGroupSearch');
+      const query = (searchInput?.value || '').toLowerCase().trim();
 
-      document.getElementById('selectedCounter').innerText = selectedSet.size;
-      document.getElementById('totalActiveCounter').innerText = allGroups.length;
-      document.getElementById('btnGroupCount').innerText = selectedSet.size;
+      const activeGroups = allGroups.filter(g => !hiddenSet.has(g.id));
+      const hiddenGroups = allGroups.filter(g => hiddenSet.has(g.id));
 
-      if (allGroups.length === 0) {
-        container.innerHTML = '<div style="padding:24px;text-align:center;color:var(--muted);">Nenhum grupo encontrado.</div>';
-        return;
-      }
-      if (filtered.length === 0) {
-        container.innerHTML = '<div style="padding:24px;text-align:center;color:var(--muted);">Nenhum grupo corresponde à busca.</div>';
-        return;
-      }
+      const activeCountEl = document.getElementById('activeGroupsCount');
+      const hiddenCountEl = document.getElementById('hiddenGroupsCount');
+      const selectedCounterEl = document.getElementById('selectedCounter');
+      const totalActiveCounterEl = document.getElementById('totalActiveCounter');
+      const btnGroupCountEl = document.getElementById('btnGroupCount');
 
-      container.innerHTML = filtered.map(g => {
-        const isSel = selectedSet.has(g.id);
-        return \`
-          <div class="group-item \${isSel ? 'selected' : ''}" onclick="toggleGroup('\${g.id}')">
-            <div class="group-left">
-              <input type="checkbox" \${isSel ? 'checked' : ''} onclick="event.stopPropagation(); toggleGroup('\${g.id}')" />
-              <div class="group-name" title="\${g.subject.replace(/"/g, '&quot;')}">\${g.subject}</div>
+      if (activeCountEl) activeCountEl.innerText = activeGroups.length;
+      if (hiddenCountEl) hiddenCountEl.innerText = hiddenGroups.length;
+      if (selectedCounterEl) selectedCounterEl.innerText = selectedSet.size;
+      if (totalActiveCounterEl) totalActiveCounterEl.innerText = activeGroups.length;
+      if (btnGroupCountEl) btnGroupCountEl.innerText = selectedSet.size;
+
+      if (currentGroupFilter === 'active') {
+        const filtered = activeGroups.filter(g => (g.subject || '').toLowerCase().includes(query));
+
+        if (allGroups.length === 0) {
+          container.innerHTML = '<div style="padding:24px;text-align:center;color:var(--muted);">Nenhum grupo encontrado na conta.</div>';
+          return;
+        }
+        if (activeGroups.length === 0) {
+          container.innerHTML = '<div style="padding:24px;text-align:center;color:var(--muted);">Todos os seus grupos estão ocultos! Abra a aba "Ocultos" acima para reexibir.</div>';
+          return;
+        }
+        if (filtered.length === 0) {
+          container.innerHTML = '<div style="padding:24px;text-align:center;color:var(--muted);">Nenhum grupo ativo corresponde à busca.</div>';
+          return;
+        }
+
+        container.innerHTML = filtered.map(g => {
+          const isSel = selectedSet.has(g.id);
+          const safeName = (g.subject || 'Grupo sem nome').replace(/"/g, '&quot;');
+          return \`
+            <div class="group-item \${isSel ? 'selected' : ''}" onclick="toggleGroup('\${g.id}')">
+              <div class="group-left">
+                <input type="checkbox" \${isSel ? 'checked' : ''} onclick="event.stopPropagation(); toggleGroup('\${g.id}')" />
+                <div class="group-name" title="\${safeName}">\${safeName}</div>
+              </div>
+              <div class="group-right">
+                <span class="group-meta">👥 \${g.size || 0}</span>
+                <button type="button" class="btn-hide-group" title="Ocultar para nunca enviar anúncios a este grupo" onclick="event.stopPropagation(); toggleHideGroup('\${g.id}', true)">
+                  🚫 Ocultar
+                </button>
+              </div>
             </div>
-            <div class="group-meta">👥 \${g.size || 0}</div>
+          \`;
+        }).join('');
+      } else {
+        // Aba de Grupos Ocultos (Blindados)
+        const filtered = hiddenGroups.filter(g => (g.subject || '').toLowerCase().includes(query));
+        const banner = \`
+          <div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.25);border-radius:8px;padding:10px 14px;margin:8px;font-size:12.5px;color:#fca5a5;display:flex;align-items:center;gap:8px;">
+            <span style="font-size:16px;">🔒</span>
+            <div><strong>100% Blindados:</strong> Estes grupos nunca receberão anúncios nos disparos automáticos.</div>
           </div>
         \`;
-      }).join('');
+
+        if (hiddenGroups.length === 0) {
+          container.innerHTML = banner + '<div style="padding:24px;text-align:center;color:var(--muted);">Nenhum grupo oculto no momento. Para proteger um grupo de receber anúncios, clique em "🚫 Ocultar" na lista ativa.</div>';
+          return;
+        }
+        if (filtered.length === 0) {
+          container.innerHTML = banner + '<div style="padding:24px;text-align:center;color:var(--muted);">Nenhum grupo oculto corresponde à busca.</div>';
+          return;
+        }
+
+        container.innerHTML = banner + filtered.map(g => {
+          const safeName = (g.subject || 'Grupo sem nome').replace(/"/g, '&quot;');
+          return \`
+            <div class="group-item" style="opacity:0.95;">
+              <div class="group-left">
+                <span style="font-size:15px;color:#ef4444;" title="Grupo Blindado / Oculto">🔒</span>
+                <div class="group-name" style="color:#d1d7db;" title="\${safeName}">\${safeName}</div>
+              </div>
+              <div class="group-right">
+                <span class="group-meta">👥 \${g.size || 0}</span>
+                <button type="button" class="btn-unhide-group" title="Reexibir grupo na lista ativa" onclick="event.stopPropagation(); toggleHideGroup('\${g.id}', false)">
+                  👁️ Reexibir
+                </button>
+              </div>
+            </div>
+          \`;
+        }).join('');
+      }
     }
 
     function toggleGroup(id) {
+      if (hiddenSet.has(id)) return;
       if (selectedSet.has(id)) selectedSet.delete(id);
       else selectedSet.add(id);
       renderGroups();
       saveAllSettings();
     }
 
+    function toggleHideGroup(id, hide) {
+      if (hide) {
+        hiddenSet.add(id);
+        selectedSet.delete(id);
+      } else {
+        hiddenSet.delete(id);
+      }
+      renderGroups();
+      saveAllSettings();
+    }
+
+    function unhideAllGroups() {
+      if (hiddenSet.size === 0) return;
+      if (!confirm('Deseja realmente reexibir todos os grupos ocultos na lista ativa?')) return;
+      hiddenSet.clear();
+      renderGroups();
+      saveAllSettings();
+    }
+
     function selectAllGroups(select) {
       if (select) {
-        for (const g of allGroups) selectedSet.add(g.id);
+        for (const g of allGroups) {
+          if (!hiddenSet.has(g.id)) {
+            selectedSet.add(g.id);
+          }
+        }
       } else {
         selectedSet.clear();
       }
@@ -2310,6 +2481,7 @@ app.get(["/", "/qr"], async (req, res) => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           selectedGroups: Array.from(selectedSet),
+          hiddenGroups: Array.from(hiddenSet),
           minDelaySec,
           maxDelaySec,
           simulateTyping,
@@ -2320,8 +2492,11 @@ app.get(["/", "/qr"], async (req, res) => {
     }
 
     async function startBroadcast() {
+      for (const hid of hiddenSet) {
+        selectedSet.delete(hid);
+      }
       if (selectedSet.size === 0) {
-        alert('Selecione pelo menos 1 grupo na lista ao lado!');
+        alert('Selecione pelo menos 1 grupo ativo na lista!');
         return;
       }
       const activeAds = adsList.filter(a => a.enabled && (a.caption?.trim() || a.imageBase64));
@@ -2346,6 +2521,7 @@ app.get(["/", "/qr"], async (req, res) => {
           body: JSON.stringify({
             ads: adsList,
             selectedGroups: Array.from(selectedSet),
+            hiddenGroups: Array.from(hiddenSet),
             minDelaySec,
             maxDelaySec,
             simulateTyping,
