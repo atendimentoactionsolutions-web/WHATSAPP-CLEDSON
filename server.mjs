@@ -223,6 +223,7 @@ let cachedGroups = [];
 // ─── Estado do Disparador Anti-Ban (Fila Humana com Rotação) ────────────────
 let campaignState = {
   isRunning: false,
+  isPaused: false,
   shouldStop: false,
   id: null,
   startedAt: null,
@@ -471,6 +472,7 @@ async function startHumanBroadcast({ targetGroupIds, source = "Painel Web" }) {
 
   campaignState = {
     isRunning: true,
+    isPaused: false,
     shouldStop: false,
     id: "camp_" + Date.now(),
     startedAt: new Date().toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" }),
@@ -501,6 +503,13 @@ async function startHumanBroadcast({ targetGroupIds, source = "Painel Web" }) {
           addCampaignLog("Sistema", "WARN", "Disparo cancelado manualmente.");
           break;
         }
+
+        // Aguarda enquanto estiver pausado
+        while (campaignState.isPaused && !campaignState.shouldStop) {
+          campaignState.statusText = `Disparo pausado temporariamente (${campaignState.sentCount}/${orderedIds.length} enviados)...`;
+          await delay(1000);
+        }
+        if (campaignState.shouldStop) break;
 
         const jid = orderedIds[i];
         const groupName = groupMap.get(jid) || jid;
@@ -578,6 +587,13 @@ async function startHumanBroadcast({ targetGroupIds, source = "Painel Web" }) {
 
           for (let remaining = waitSec; remaining > 0; remaining--) {
             if (campaignState.shouldStop) break;
+
+            while (campaignState.isPaused && !campaignState.shouldStop) {
+              campaignState.statusText = `Disparo pausado temporariamente (${campaignState.sentCount}/${orderedIds.length} enviados)...`;
+              await delay(1000);
+            }
+            if (campaignState.shouldStop) break;
+
             campaignState.nextActionInSec = remaining;
             campaignState.statusText = `Intervalo humano anti-ban (${remaining}s) antes do próximo envio ("${nextName}")...`;
             await delay(1000);
@@ -586,6 +602,7 @@ async function startHumanBroadcast({ targetGroupIds, source = "Painel Web" }) {
       }
     } finally {
       campaignState.isRunning = false;
+      campaignState.isPaused = false;
       campaignState.nextActionInSec = 0;
       campaignState.currentGroupName = null;
       campaignState.currentAdName = null;
@@ -763,6 +780,26 @@ async function initWhatsApp(forceReset = false) {
 
           if (!text) continue;
           const trimmed = text.trim();
+
+          if (/^#pausar$/i.test(trimmed)) {
+            if (campaignState.isRunning) {
+              campaignState.isPaused = true;
+              await sock.sendMessage(remoteJid, { text: "⏸️ Disparo pausado! Envie *#continuar* para retomar ou *#parar* para cancelar." });
+            } else {
+              await sock.sendMessage(remoteJid, { text: "ℹ️ Nenhum disparo em andamento no momento." });
+            }
+            continue;
+          }
+
+          if (/^#continuar$/i.test(trimmed)) {
+            if (campaignState.isRunning && campaignState.isPaused) {
+              campaignState.isPaused = false;
+              await sock.sendMessage(remoteJid, { text: "▶️ Disparo retomado com sucesso!" });
+            } else {
+              await sock.sendMessage(remoteJid, { text: "ℹ️ O disparo não está pausado." });
+            }
+            continue;
+          }
 
           if (/^#parar$/i.test(trimmed)) {
             if (campaignState.isRunning) {
@@ -1042,6 +1079,17 @@ app.post("/broadcast", async (req, res) => {
   } catch (err) {
     res.status(400).json({ success: false, error: err.message });
   }
+});
+
+// POST /broadcast/pause — pausa ou retoma o disparo
+app.post("/broadcast/pause", (req, res) => {
+  if (!campaignState.isRunning) {
+    return res.json({ success: false, message: "Nenhum disparo em andamento." });
+  }
+  campaignState.isPaused = !campaignState.isPaused;
+  const statusMsg = campaignState.isPaused ? "Disparo pausado." : "Disparo retomado.";
+  addCampaignLog("Sistema", "INFO", statusMsg);
+  res.json({ success: true, isPaused: campaignState.isPaused, message: statusMsg });
 });
 
 // POST /broadcast/stop
@@ -1532,12 +1580,19 @@ app.get(["/", "/qr"], async (req, res) => {
           </label>
         </div>
 
-        <button id="startBtn" class="btn-primary" onclick="startBroadcast()">
-          🚀 Disparar Ofertas Mescladas (<span id="btnGroupCount">0</span> Grupos)
-        </button>
-        <button id="stopBtn" class="btn-stop" style="display:none;" onclick="stopBroadcast()">
-          🛑 Parar Disparo Imediatamente
-        </button>
+        <div style="display:flex;flex-direction:column;gap:8px;">
+          <button id="startBtn" class="btn-primary" onclick="startBroadcast()">
+            🚀 Disparar Ofertas Mescladas (<span id="btnGroupCount">0</span> Grupos)
+          </button>
+          <div style="display:flex;gap:10px;">
+            <button id="pauseBtn" class="btn" style="display:none;flex:1;background:var(--warn);color:#0b141a;font-weight:700;padding:12px;" onclick="togglePauseBroadcast()">
+              ⏸️ Pausar Disparo
+            </button>
+            <button id="stopBtn" class="btn-stop" style="display:none;flex:1;margin-top:0;" onclick="stopBroadcast()">
+              🛑 Parar Disparo
+            </button>
+          </div>
+        </div>
       </div>
 
       <!-- Coluna Direita: Grupos Ativos + Progresso -->
@@ -2125,6 +2180,16 @@ app.get(["/", "/qr"], async (req, res) => {
       }
     }
 
+    async function togglePauseBroadcast() {
+      try {
+        const res = await fetch('/broadcast/pause', { method: 'POST' });
+        const data = await res.json();
+        pollStatus();
+      } catch (e) {
+        alert('Erro ao pausar/retomar disparo.');
+      }
+    }
+
     async function stopBroadcast() {
       await fetch('/broadcast/stop', { method: 'POST' });
       pollStatus();
@@ -2193,6 +2258,7 @@ app.get(["/", "/qr"], async (req, res) => {
         if (data.campaign) {
           const c = data.campaign;
           const startBtn = document.getElementById('startBtn');
+          const pauseBtn = document.getElementById('pauseBtn');
           const stopBtn = document.getElementById('stopBtn');
           const counters = document.getElementById('campaignCounters');
           const statusTxt = document.getElementById('campaignStatusText');
@@ -2201,6 +2267,19 @@ app.get(["/", "/qr"], async (req, res) => {
 
           startBtn.disabled = c.isRunning;
           stopBtn.style.display = c.isRunning ? 'block' : 'none';
+          
+          if (pauseBtn) {
+            pauseBtn.style.display = c.isRunning ? 'block' : 'none';
+            if (c.isPaused) {
+              pauseBtn.innerHTML = '▶️ Retomar Disparo';
+              pauseBtn.style.background = 'var(--green)';
+              pauseBtn.style.color = '#0b141a';
+            } else {
+              pauseBtn.innerHTML = '⏸️ Pausar Disparo';
+              pauseBtn.style.background = 'var(--warn)';
+              pauseBtn.style.color = '#0b141a';
+            }
+          }
 
           const doneCount = (c.sentCount || 0) + (c.failedCount || 0);
           const pct = c.totalGroups > 0 ? Math.round((doneCount / c.totalGroups) * 100) : 0;
