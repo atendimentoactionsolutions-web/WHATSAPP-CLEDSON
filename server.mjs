@@ -1795,6 +1795,28 @@ app.get(["/", "/qr"], async (req, res) => {
     .chat-bubble-time {
       font-size: 10.5px; color: rgba(255,255,255,0.55); margin-top: 4px; text-align: right;
     }
+    @keyframes micPulseAnim {
+      0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+      70% { transform: scale(1.12); box-shadow: 0 0 0 8px rgba(239, 68, 68, 0); }
+      100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+    }
+    .btn-mic-icon:hover {
+      color: #38bdf8 !important;
+      background: rgba(56, 189, 248, 0.12) !important;
+    }
+    .mic-recording-active {
+      background: #ef4444 !important;
+      color: #ffffff !important;
+      animation: micPulseAnim 1.4s infinite !important;
+    }
+    .mic-pulse-dot {
+      width: 9px;
+      height: 9px;
+      background-color: #ef4444;
+      border-radius: 50%;
+      display: inline-block;
+      animation: micPulseAnim 1.2s infinite;
+    }
   </style>
 </head>
 <body>
@@ -2057,17 +2079,31 @@ app.get(["/", "/qr"], async (req, res) => {
                 <span style="font-size:14px;">✨</span>
                 <strong style="font-size:12.5px;color:#38bdf8;">Copiloto IA — O que você deseja responder ao cliente?</strong>
               </div>
-              <div style="display:flex;gap:8px;">
-                <input type="text" id="aiInstructionInput" placeholder="Ex: tenho o 15 Pro 128gb lacrado por 4800 à vista e parcelo em 18x..." style="flex:1;background:#0b141a;border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;" onkeydown="if(event.key==='Enter') formulateWithAI()" />
-                <button id="btnAiFormulate" class="btn" style="background:#38bdf8;color:#0b141a;font-weight:700;white-space:nowrap;padding:8px 14px;border:none;border-radius:8px;cursor:pointer;" onclick="formulateWithAI()">
-                  ✨ Formular com IA
+              <div style="display:flex;gap:8px;align-items:center;">
+                <div style="position:relative;flex:1;display:flex;align-items:center;">
+                  <input type="text" id="aiInstructionInput" placeholder="Ex: tenho o 15 Pro 128gb lacrado por 4800 à vista e parcelo em 18x..." style="width:100%;background:#0b141a;border:1px solid var(--border);color:#fff;padding:9px 42px 9px 12px;border-radius:8px;font-size:13px;outline:none;" onkeydown="if(event.key==='Enter') formulateWithAI()" />
+                  <button id="btnVoiceMic" type="button" title="Falar no Microfone (fale com a IA)" onclick="toggleVoiceRecognition()" class="btn-mic-icon" style="position:absolute;right:6px;background:transparent;border:none;color:#94a3b8;cursor:pointer;padding:6px;border-radius:50%;display:flex;align-items:center;justify-content:center;transition:all 0.2s;">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
+                  </button>
+                </div>
+                <button id="btnAiFormulate" class="btn" style="background:#38bdf8;color:#0b141a;font-weight:700;white-space:nowrap;padding:9px 16px;border:none;border-radius:8px;cursor:pointer;display:flex;align-items:center;gap:6px;" onclick="formulateWithAI()">
+                  <span>✨</span> Formular com IA
                 </button>
+              </div>
+              <div id="voiceListeningNotice" style="display:none;margin-top:7px;font-size:12px;color:#ef4444;font-weight:600;align-items:center;gap:8px;">
+                <span class="mic-pulse-dot"></span>
+                <span id="voiceListeningText">🔴 Ouvindo... Fale normalmente no microfone</span>
               </div>
             </div>
 
             <!-- Caixa de Texto Final & Botão de Envio -->
             <div style="display:flex;gap:10px;align-items:flex-end;">
-              <textarea id="chatReplyText" rows="3" placeholder="Digite sua resposta aqui ou use a IA acima para formular automaticamente..." style="flex:1;background:#0b141a;border:1px solid var(--border);color:#fff;padding:10px 12px;border-radius:10px;font-size:13.5px;resize:none;font-family:inherit;line-height:1.4;" onkeydown="if(event.key==='Enter' && !event.shiftKey){ event.preventDefault(); sendChatMessage(); }"></textarea>
+              <div style="position:relative;flex:1;display:flex;">
+                <textarea id="chatReplyText" rows="3" placeholder="Digite sua resposta aqui ou use a IA acima para formular automaticamente..." style="width:100%;background:#0b141a;border:1px solid var(--border);color:#fff;padding:10px 42px 10px 12px;border-radius:10px;font-size:13.5px;resize:none;font-family:inherit;line-height:1.4;" onkeydown="if(event.key==='Enter' && !event.shiftKey){ event.preventDefault(); sendChatMessage(); }"></textarea>
+                <button id="btnVoiceMicDirect" type="button" title="Ditar mensagem no microfone" onclick="toggleVoiceDirect()" class="btn-mic-icon" style="position:absolute;right:8px;bottom:8px;background:transparent;border:none;color:#94a3b8;cursor:pointer;padding:6px;border-radius:50%;display:flex;align-items:center;justify-content:center;transition:all 0.2s;">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
+                </button>
+              </div>
               <button id="btnSendReply" class="btn" style="background:var(--green);color:#0b141a;font-weight:700;padding:12px 18px;height:72px;border-radius:10px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;border:none;cursor:pointer;" onclick="sendChatMessage()">
                 <span style="font-size:18px;">🚀</span>
                 <span style="font-size:12px;">Enviar</span>
@@ -3041,7 +3077,159 @@ app.get(["/", "/qr"], async (req, res) => {
       }).join('');
     }
 
+    let voiceRecogAi = null;
+    let isVoiceAiActive = false;
+
+    function toggleVoiceRecognition() {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        alert('Seu navegador não possui suporte ao microfone / reconhecimento de voz. Recomendamos usar o Google Chrome ou Microsoft Edge.');
+        return;
+      }
+
+      const micBtn = document.getElementById('btnVoiceMic');
+      const notice = document.getElementById('voiceListeningNotice');
+      const noticeText = document.getElementById('voiceListeningText');
+      const input = document.getElementById('aiInstructionInput');
+
+      if (isVoiceAiActive) {
+        if (voiceRecogAi) {
+          try { voiceRecogAi.stop(); } catch(e){}
+        }
+        return;
+      }
+
+      try {
+        voiceRecogAi = new SpeechRecognition();
+      } catch (err) {
+        alert('Não foi possível iniciar o microfone: ' + err.message);
+        return;
+      }
+
+      voiceRecogAi.lang = 'pt-BR';
+      voiceRecogAi.continuous = true;
+      voiceRecogAi.interimResults = true;
+
+      let baseText = input.value.trim();
+      if (baseText) baseText += ' ';
+
+      voiceRecogAi.onstart = function() {
+        isVoiceAiActive = true;
+        micBtn.classList.add('mic-recording-active');
+        notice.style.display = 'flex';
+        noticeText.innerText = '🔴 Ouvindo sua voz... Fale o que quer responder ao cliente!';
+      };
+
+      voiceRecogAi.onresult = function(event) {
+        let transcript = '';
+        for (let i = 0; i < event.results.length; i++) {
+          transcript += event.results[i][0].transcript;
+        }
+        input.value = baseText + transcript;
+      };
+
+      voiceRecogAi.onerror = function(event) {
+        console.warn('Voice recognition error:', event.error);
+        if (event.error === 'not-allowed') {
+          alert('Permissão de microfone negada. Permita o uso do microfone no cadeado ou configurações do seu navegador para ditar.');
+        }
+        stopVoiceAiUI();
+      };
+
+      voiceRecogAi.onend = function() {
+        stopVoiceAiUI();
+      };
+
+      function stopVoiceAiUI() {
+        isVoiceAiActive = false;
+        micBtn.classList.remove('mic-recording-active');
+        notice.style.display = 'none';
+      }
+
+      try {
+        voiceRecogAi.start();
+      } catch (err) {
+        console.error('Falha ao acionar microfone:', err);
+        stopVoiceAiUI();
+      }
+    }
+
+    let voiceRecogDirect = null;
+    let isVoiceDirectActive = false;
+
+    function toggleVoiceDirect() {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        alert('Seu navegador não possui suporte ao microfone. Recomendamos usar o Google Chrome ou Microsoft Edge.');
+        return;
+      }
+
+      const micBtn = document.getElementById('btnVoiceMicDirect');
+      const textarea = document.getElementById('chatReplyText');
+
+      if (isVoiceDirectActive) {
+        if (voiceRecogDirect) {
+          try { voiceRecogDirect.stop(); } catch(e){}
+        }
+        return;
+      }
+
+      try {
+        voiceRecogDirect = new SpeechRecognition();
+      } catch (err) {
+        alert('Não foi possível iniciar o microfone: ' + err.message);
+        return;
+      }
+
+      voiceRecogDirect.lang = 'pt-BR';
+      voiceRecogDirect.continuous = true;
+      voiceRecogDirect.interimResults = true;
+
+      let baseText = textarea.value.trim();
+      if (baseText) baseText += ' ';
+
+      voiceRecogDirect.onstart = function() {
+        isVoiceDirectActive = true;
+        micBtn.classList.add('mic-recording-active');
+      };
+
+      voiceRecogDirect.onresult = function(event) {
+        let transcript = '';
+        for (let i = 0; i < event.results.length; i++) {
+          transcript += event.results[i][0].transcript;
+        }
+        textarea.value = baseText + transcript;
+      };
+
+      voiceRecogDirect.onerror = function(event) {
+        console.warn('Voice direct error:', event.error);
+        if (event.error === 'not-allowed') {
+          alert('Permissão de microfone negada. Permita o microfone no navegador para usar.');
+        }
+        stopVoiceDirectUI();
+      };
+
+      voiceRecogDirect.onend = function() {
+        stopVoiceDirectUI();
+      };
+
+      function stopVoiceDirectUI() {
+        isVoiceDirectActive = false;
+        micBtn.classList.remove('mic-recording-active');
+      }
+
+      try {
+        voiceRecogDirect.start();
+      } catch (err) {
+        console.error('Falha ao acionar microfone:', err);
+        stopVoiceDirectUI();
+      }
+    }
+
     async function formulateWithAI() {
+      if (isVoiceAiActive && voiceRecogAi) {
+        try { voiceRecogAi.stop(); } catch(e){}
+      }
       const instructionInput = document.getElementById('aiInstructionInput');
       const instruction = instructionInput.value.trim();
       if (!instruction) {
@@ -3082,6 +3270,9 @@ app.get(["/", "/qr"], async (req, res) => {
     }
 
     async function sendChatMessage() {
+      if (isVoiceDirectActive && voiceRecogDirect) {
+        try { voiceRecogDirect.stop(); } catch(e){}
+      }
       const replyTextArea = document.getElementById('chatReplyText');
       const text = replyTextArea.value.trim();
       if (!text) return;
