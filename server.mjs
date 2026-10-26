@@ -124,29 +124,9 @@ function saveAds() {
   }
 }
 
-// ─── Cache em Memória e Persistência de Links de Convite Detectados ───
+// ─── Cache em Memória de Mensagens ───
 const messageStore = new Map();
-const RADAR_CACHE_FILE = path.join(DATA_DIR, "radar_invites.json");
-const detectedInvites = new Map(); // code -> { code, inviteUrl, foundInGroup, groupName, sender, text, timestamp, groupMeta }
-
-try {
-  if (fs.existsSync(RADAR_CACHE_FILE)) {
-    const rawInvites = JSON.parse(fs.readFileSync(RADAR_CACHE_FILE, "utf-8"));
-    if (Array.isArray(rawInvites)) {
-      for (const item of rawInvites) {
-        if (item && item.code) detectedInvites.set(item.code, item);
-      }
-    }
-  }
-} catch (e) {
-  console.error("Erro ao carregar radar_invites.json:", e);
-}
-
-function saveRadarInvites() {
-  try {
-    fs.writeFileSync(RADAR_CACHE_FILE, JSON.stringify(Array.from(detectedInvites.values()), null, 2));
-  } catch (e) {}
-}
+const contactsMap = new Map();
 
 // ─── Armazenamento de Conversas Privadas para Atendimento com IA ───
 const CHATS_FILE = path.join(DATA_DIR, "conversations.json");
@@ -199,11 +179,14 @@ function savePrivateMessageToChat(msg) {
     const msgId = msg.key.id || `msg_${Date.now()}`;
     const displaySnippet = text || (m.imageMessage ? "📷 [Foto]" : m.audioMessage ? "🎵 [Áudio]" : "📄 [Arquivo]");
 
+    if (pushName) contactsMap.set(remoteJid, pushName);
+    const resolvedName = pushName || contactsMap.get(remoteJid) || `+${cleanNumber}`;
+
     let conv = conversations.find((c) => c.jid === remoteJid);
     if (!conv) {
       conv = {
         jid: remoteJid,
-        name: pushName || `+${cleanNumber}`,
+        name: resolvedName,
         number: cleanNumber,
         lastMessage: displaySnippet,
         lastTimestamp: timestamp,
@@ -212,7 +195,7 @@ function savePrivateMessageToChat(msg) {
       };
       conversations.unshift(conv);
     } else {
-      if (pushName && conv.name.startsWith("+")) conv.name = pushName;
+      if (resolvedName && conv.name.startsWith("+")) conv.name = resolvedName;
       conv.lastMessage = displaySnippet;
       conv.lastTimestamp = timestamp;
       if (!fromMe) conv.unreadCount = (conv.unreadCount || 0) + 1;
@@ -239,6 +222,35 @@ function savePrivateMessageToChat(msg) {
   } catch (e) {}
 }
 
+function upsertPrivateChatFromBaileys(chat) {
+  if (!chat || !chat.id) return;
+  const remoteJid = chat.id;
+  if (remoteJid.endsWith("@g.us") || remoteJid.includes("broadcast") || remoteJid.includes("@newsletter")) return;
+
+  const cleanNumber = remoteJid.split("@")[0];
+  const name = chat.name || contactsMap.get(remoteJid) || `+${cleanNumber}`;
+  const timestamp = chat.conversationTimestamp ? Number(chat.conversationTimestamp) * 1000 : Date.now();
+  const unreadCount = Number(chat.unreadCount) || 0;
+
+  let conv = conversations.find((c) => c.jid === remoteJid);
+  if (!conv) {
+    conv = {
+      jid: remoteJid,
+      name,
+      number: cleanNumber,
+      lastMessage: "Conversa sincronizada",
+      lastTimestamp: timestamp,
+      unreadCount,
+      messages: [],
+    };
+    conversations.push(conv);
+  } else {
+    if (chat.name && conv.name.startsWith("+")) conv.name = chat.name;
+    if (chat.conversationTimestamp) conv.lastTimestamp = timestamp;
+    if (unreadCount > 0) conv.unreadCount = unreadCount;
+  }
+}
+
 function saveMessageToStore(msg) {
   if (!msg || !msg.key || !msg.key.id) return;
   const key = `${msg.key.remoteJid}:${msg.key.id}`;
@@ -248,45 +260,6 @@ function saveMessageToStore(msg) {
     const firstKey = messageStore.keys().next().value;
     if (firstKey) messageStore.delete(firstKey);
   }
-
-  // Extrair texto da mensagem para caçar links de convite (chat.whatsapp.com)
-  try {
-    const m = msg.message;
-    const text =
-      m?.conversation ||
-      m?.extendedTextMessage?.text ||
-      m?.imageMessage?.caption ||
-      m?.videoMessage?.caption ||
-      m?.documentMessage?.caption ||
-      m?.templateButtonReplyMessage?.selectedId ||
-      "";
-
-    if (text && text.includes("chat.whatsapp.com")) {
-      const matches = text.match(/chat\.whatsapp\.com\/([A-Za-z0-9_-]{20,26})/g);
-      if (matches) {
-        let hasNew = false;
-        for (const mStr of matches) {
-          const code = mStr.split("/").pop();
-          if (code && !detectedInvites.has(code)) {
-            const remoteJid = msg.key.remoteJid || "";
-            const groupName = cachedGroups.find((g) => g.id === remoteJid)?.subject || remoteJid;
-            detectedInvites.set(code, {
-              code,
-              url: `https://chat.whatsapp.com/${code}`,
-              foundInGroup: remoteJid,
-              groupName,
-              sender: msg.key.participant || msg.key.remoteJid,
-              snippet: text.slice(0, 300),
-              timestamp: msg.messageTimestamp ? msg.messageTimestamp * 1000 : Date.now(),
-            });
-            hasNew = true;
-            console.log(`🎯 [RADAR] Novo link de convite detectado: https://chat.whatsapp.com/${code} (origem: ${groupName})`);
-          }
-        }
-        if (hasNew) saveRadarInvites();
-      }
-    }
-  } catch (e) {}
 }
 
 class SimpleNodeCache {
@@ -786,6 +759,7 @@ async function initWhatsApp(forceReset = false) {
         msgRetryCounterCache,
         browser: ["WhatsApp Cledson", "Chrome", "124.0.0.0"],
         syncFullHistory: false,
+        shouldSyncHistoryMessage: () => true,
         markOnlineOnConnect: true,
         generateHighQualityLinkPreview: true,
         getMessage: async (key) => {
@@ -796,6 +770,68 @@ async function initWhatsApp(forceReset = false) {
 
       waSocket = sock;
       sock.ev.on("creds.update", saveCreds);
+
+      // ─── Sincronização de Histórico e Conversas do WhatsApp ───
+      sock.ev.on("messaging-history.set", async ({ chats, contacts, messages }) => {
+        try {
+          if (Array.isArray(contacts)) {
+            for (const c of contacts) {
+              if (c.id && (c.name || c.notify || c.verifiedName)) {
+                contactsMap.set(c.id, c.name || c.notify || c.verifiedName);
+              }
+            }
+          }
+          if (Array.isArray(chats)) {
+            for (const chat of chats) {
+              upsertPrivateChatFromBaileys(chat);
+            }
+          }
+          if (Array.isArray(messages)) {
+            for (const m of messages) {
+              saveMessageToStore(m);
+              savePrivateMessageToChat(m);
+            }
+          }
+          saveConversations();
+          console.log(`💬 [CHATS] Sincronização de histórico concluída: ${conversations.length} conversas registradas.`);
+        } catch (e) {
+          console.error("Erro em messaging-history.set:", e);
+        }
+      });
+
+      sock.ev.on("chats.set", async ({ chats }) => {
+        try {
+          if (!Array.isArray(chats)) return;
+          for (const chat of chats) {
+            upsertPrivateChatFromBaileys(chat);
+          }
+          saveConversations();
+        } catch (e) {}
+      });
+
+      sock.ev.on("contacts.set", ({ contacts }) => {
+        if (!Array.isArray(contacts)) return;
+        for (const c of contacts) {
+          if (c.id && (c.name || c.notify || c.verifiedName)) {
+            contactsMap.set(c.id, c.name || c.notify || c.verifiedName);
+            const conv = conversations.find((cv) => cv.jid === c.id);
+            if (conv && conv.name.startsWith("+")) conv.name = c.name || c.notify || c.verifiedName;
+          }
+        }
+        saveConversations();
+      });
+
+      sock.ev.on("contacts.upsert", (contacts) => {
+        if (!Array.isArray(contacts)) return;
+        for (const c of contacts) {
+          if (c.id && (c.name || c.notify || c.verifiedName)) {
+            contactsMap.set(c.id, c.name || c.notify || c.verifiedName);
+            const conv = conversations.find((cv) => cv.jid === c.id);
+            if (conv && conv.name.startsWith("+")) conv.name = c.name || c.notify || c.verifiedName;
+          }
+        }
+        saveConversations();
+      });
 
       // ─── Detecção Automática e Instantânea de Novos Grupos (100% sem fantasmas) ───
       // 1. Quando você entra em um grupo ou alguém te adiciona
@@ -825,13 +861,14 @@ async function initWhatsApp(forceReset = false) {
         }
       });
 
-      // 2. Quando um novo chat de grupo aparece ou é criado
+      // 2. Quando um novo chat aparece ou é criado
       sock.ev.on("chats.upsert", async (newChats) => {
         try {
           if (!Array.isArray(newChats)) return;
           for (const chat of newChats) {
             const jid = chat.id;
-            if (jid && jid.endsWith("@g.us") && !cachedGroups.some((g) => g.id === jid)) {
+            if (!jid) continue;
+            if (jid.endsWith("@g.us") && !cachedGroups.some((g) => g.id === jid)) {
               console.log(`🔔 [AUTO-SYNC] Novo chat de grupo detectado: ${jid}`);
               await delay(1200);
               try {
@@ -846,8 +883,11 @@ async function initWhatsApp(forceReset = false) {
               } catch (metaErr) {
                 await refreshGroups().catch(() => {});
               }
+            } else if (!jid.endsWith("@g.us") && !jid.includes("broadcast") && !jid.includes("@newsletter")) {
+              upsertPrivateChatFromBaileys(chat);
             }
           }
+          saveConversations();
         } catch (e) {
           console.error("Erro no listener chats.upsert:", e);
         }
@@ -1002,57 +1042,6 @@ initWhatsApp().catch(() => {});
 const app = express();
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
-
-// GET /invites — grupos descobertos nas conversas que o usuário ainda não participa
-app.get("/invites", async (req, res) => {
-  const currentGroupIds = new Set(cachedGroups.map((g) => g.id));
-  const invitesList = Array.from(detectedInvites.values()).slice(-100).reverse();
-  const resolved = [];
-
-  for (const inv of invitesList) {
-    let groupMeta = inv.groupMeta || null;
-    let alreadyIn = false;
-
-    if (!groupMeta && waSocket && waStatus === "CONNECTED") {
-      try {
-        groupMeta = await Promise.race([
-          waSocket.groupGetInviteInfo(inv.code),
-          new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 2000))
-        ]);
-        if (groupMeta) {
-          inv.groupMeta = {
-            id: groupMeta.id,
-            subject: groupMeta.subject,
-            size: groupMeta.size || (groupMeta.participants ? groupMeta.participants.length : 0),
-            desc: groupMeta.desc || "",
-          };
-          saveRadarInvites();
-        }
-      } catch (e) {
-        groupMeta = { error: e.message || "Inválido ou expirado" };
-      }
-    }
-
-    if (groupMeta && groupMeta.id) {
-      alreadyIn = currentGroupIds.has(groupMeta.id);
-    }
-
-    resolved.push({
-      ...inv,
-      groupMeta: groupMeta || inv.groupMeta,
-      alreadyIn,
-    });
-  }
-
-  // Filtrar apenas os que ainda NÃO faz parte e não deram erro
-  const newGroups = resolved.filter((r) => !r.alreadyIn);
-
-  res.json({
-    totalDetected: invitesList.length,
-    newGroupsCount: newGroups.length,
-    invites: newGroups,
-  });
-});
 
 // GET /status
 app.get("/status", (req, res) => {
@@ -1301,6 +1290,38 @@ app.post("/chats/send", async (req, res) => {
   }
 });
 
+// POST /chats/start — inicia uma conversa com qualquer número
+app.post("/chats/start", (req, res) => {
+  try {
+    let { phone, name } = req.body;
+    if (!phone) return res.status(400).json({ success: false, error: "Número de telefone obrigatório." });
+
+    let clean = phone.replace(/\D/g, "");
+    if (clean.length === 10 || clean.length === 11) {
+      clean = "55" + clean;
+    }
+    const jid = `${clean}@s.whatsapp.net`;
+
+    let conv = conversations.find((c) => c.jid === jid);
+    if (!conv) {
+      conv = {
+        jid,
+        name: name || contactsMap.get(jid) || `+${clean}`,
+        number: clean,
+        lastMessage: "Nova conversa iniciada",
+        lastTimestamp: Date.now(),
+        unreadCount: 0,
+        messages: [],
+      };
+      conversations.unshift(conv);
+      saveConversations();
+    }
+    res.json({ success: true, chat: conv });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // POST /ai/formulate
 app.post("/ai/formulate", async (req, res) => {
   try {
@@ -1485,8 +1506,8 @@ app.get(["/", "/qr"], async (req, res) => {
     }
     .panel-sub { font-size: 13px; color: var(--muted); margin-bottom: 18px; }
 
-    /* Tabs de Anúncios */
-    .radar-badge {
+    /* Badges e Tabs */
+    .radar-badge, .nav-badge {
       background: var(--green); color: #0b141a; font-size: 11px; font-weight: 800;
       padding: 2px 7px; border-radius: 999px; margin-left: 4px;
     }
@@ -1496,29 +1517,6 @@ app.get(["/", "/qr"], async (req, res) => {
     }
     .nav-tab:hover { color: #fff; }
     .nav-tab.active { background: #222e35; color: #fff; }
-    .radar-grid {
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-      width: 100%;
-    }
-    .radar-card {
-      background: var(--card-2); border: 1px solid var(--border); border-radius: 14px;
-      padding: 14px 18px; display: flex; flex-direction: row; align-items: center; justify-content: space-between;
-      gap: 16px; transition: 0.15s; width: 100%; box-sizing: border-box;
-    }
-    .radar-card:hover { border-color: rgba(37, 211, 102, 0.4); background: rgba(255,255,255,0.02); }
-    .radar-card-content { flex: 1 1 auto; min-width: 0; }
-    .radar-name { font-size: 14.5px; font-weight: 700; color: #fff; margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; }
-    .radar-desc { font-size: 12px; color: var(--muted); line-height: 1.45; max-height: 48px; overflow: hidden; text-overflow: ellipsis; }
-    .radar-origin { font-size: 11px; color: #38bdf8; margin-top: 4px; }
-    .radar-card-action { flex: 0 0 auto; }
-    .radar-join-btn {
-      background: var(--green); color: #0b141a; border: none; padding: 9px 16px;
-      border-radius: 10px; font-size: 12.5px; font-weight: 700; text-decoration: none;
-      white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
-    }
-    .radar-join-btn:hover { background: var(--green-dark); }
     .tabs-bar {
       display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; align-items: center;
     }
@@ -1815,9 +1813,6 @@ app.get(["/", "/qr"], async (req, res) => {
           <button class="nav-tab" id="tabNavGaleria" onclick="switchMainView('galeria')">
             🖼️ Banco de Anúncios <span id="galleryBadge" class="radar-badge" style="background:#38bdf8;color:#0b141a;">0</span>
           </button>
-          <button class="nav-tab" id="tabNavRadar" onclick="switchMainView('radar')">
-            🎯 Radar de Novos Grupos <span id="radarBadge" class="radar-badge" style="display:none;">0</span>
-          </button>
           <button class="nav-tab" id="tabNavChat" onclick="switchMainView('chat')">
             💬 Atendimento & Chat IA <span id="chatBadge" class="radar-badge" style="display:none;background:#25d366;color:#0b141a;">0</span>
           </button>
@@ -2006,29 +2001,7 @@ app.get(["/", "/qr"], async (req, res) => {
       </div>
     </div>
 
-    <!-- ABA 3: RADAR DE NOVOS GRUPOS DETECTADOS -->
-    <div id="radarSection" class="panel" style="display:none;margin-top:20px;">
-      <div class="panel-title">
-        <span>🎯 Radar de Oportunidades: Grupos Descobertos nas Mensagens</span>
-        <button class="btn" onclick="loadRadarInvites()">🔄 Recarregar Radar</button>
-      </div>
-      <p class="panel-sub">
-        Convites de novos grupos postados dentro dos seus 374 grupos atuais. 
-        O robô <strong>NUNCA entra sozinho</strong>. Se achar algum grupo interessante para suas vendas, basta clicar em <strong>"Entrar pelo WhatsApp"</strong> para entrar com o seu celular.
-      </p>
-
-      <div style="display:flex;gap:10px;margin-bottom:16px;">
-        <input type="text" id="radarSearch" class="group-search" placeholder="🔍 Filtrar por nome (ex: rolo, desapego, zona leste)..." oninput="renderRadarList()" />
-      </div>
-
-      <div id="radarList" class="radar-grid">
-        <div style="padding:40px;text-align:center;color:var(--muted);">
-          Monitorando mensagens recebidas... Novos convites aparecerão aqui automaticamente!
-        </div>
-      </div>
-    </div>
-
-    <!-- ABA 4: ATENDIMENTO & CHAT COM IA -->
+    <!-- ABA 3: ATENDIMENTO & CHAT COM IA -->
     <div id="chatSection" class="panel" style="display:none;margin-top:20px;padding:0;overflow:hidden;border-radius:14px;border:1px solid var(--border);">
       <div style="display:flex;height:650px;">
         <!-- Coluna Esquerda: Lista de Conversas -->
@@ -2036,7 +2009,10 @@ app.get(["/", "/qr"], async (req, res) => {
           <div style="padding:14px;border-bottom:1px solid var(--border);">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
               <strong style="font-size:14.5px;color:#fff;">💬 Clientes Privados</strong>
-              <button class="btn" style="padding:4px 8px;font-size:11.5px;" onclick="loadChatConversations(true)">🔄 Atualizar</button>
+              <div style="display:flex;gap:6px;">
+                <button class="btn" style="padding:5px 9px;font-size:11.5px;background:var(--green);color:#0b141a;font-weight:700;border:none;" onclick="startNewChatPrompt()">➕ Nova</button>
+                <button class="btn" style="padding:5px 8px;font-size:11.5px;" onclick="loadChatConversations(true)" title="Recarregar conversas">🔄</button>
+              </div>
             </div>
             <input type="text" id="chatSearchInput" class="group-search" placeholder="🔍 Buscar por nome ou número..." oninput="renderChatConversationsList()" style="width:100%;box-sizing:border-box;font-size:12.5px;padding:8px 10px;" />
           </div>
@@ -2157,8 +2133,7 @@ app.get(["/", "/qr"], async (req, res) => {
   </div>
 
   <script>
-    let currentMainView = 'disparo'; // 'disparo' | 'galeria' | 'radar' | 'chat'
-    let radarInvitesList = [];
+    let currentMainView = 'disparo'; // 'disparo' | 'galeria' | 'chat'
     let chatsList = [];
     let activeChatJid = null;
 
@@ -2166,38 +2141,27 @@ app.get(["/", "/qr"], async (req, res) => {
       currentMainView = view;
       document.getElementById('tabNavDisparo').className = 'nav-tab' + (view === 'disparo' ? ' active' : '');
       document.getElementById('tabNavGaleria').className = 'nav-tab' + (view === 'galeria' ? ' active' : '');
-      document.getElementById('tabNavRadar').className = 'nav-tab' + (view === 'radar' ? ' active' : '');
       const chatNav = document.getElementById('tabNavChat');
       if (chatNav) chatNav.className = 'nav-tab' + (view === 'chat' ? ' active' : '');
       
       const appSec = document.getElementById('appSection');
       const galeriaSec = document.getElementById('galeriaSection');
-      const radarSec = document.getElementById('radarSection');
       const chatSec = document.getElementById('chatSection');
       
       if (view === 'disparo') {
         appSec.style.display = 'grid';
         galeriaSec.style.display = 'none';
-        radarSec.style.display = 'none';
         if (chatSec) chatSec.style.display = 'none';
         renderTabs();
         loadCurrentAdIntoEditor();
       } else if (view === 'galeria') {
         appSec.style.display = 'none';
         galeriaSec.style.display = 'block';
-        radarSec.style.display = 'none';
         if (chatSec) chatSec.style.display = 'none';
         renderGalleryGrid();
-      } else if (view === 'radar') {
-        appSec.style.display = 'none';
-        galeriaSec.style.display = 'none';
-        radarSec.style.display = 'block';
-        if (chatSec) chatSec.style.display = 'none';
-        loadRadarInvites();
       } else if (view === 'chat') {
         appSec.style.display = 'none';
         galeriaSec.style.display = 'none';
-        radarSec.style.display = 'none';
         if (chatSec) chatSec.style.display = 'block';
         loadChatConversations(true);
       }
@@ -2393,80 +2357,6 @@ app.get(["/", "/qr"], async (req, res) => {
 
     function createAdInGallery() {
       openEditModal(null);
-    }
-
-    async function loadRadarInvites() {
-      const container = document.getElementById('radarList');
-      container.innerHTML = '<div style="padding:40px;text-align:center;color:var(--muted);">Buscando novos grupos no radar...</div>';
-      try {
-        const res = await fetch('/invites');
-        const data = await res.json();
-        radarInvitesList = data.invites || [];
-        
-        const badge = document.getElementById('radarBadge');
-        if (radarInvitesList.length > 0) {
-          badge.style.display = 'inline-block';
-          badge.innerText = radarInvitesList.length;
-        } else {
-          badge.style.display = 'none';
-        }
-        
-        renderRadarList();
-      } catch (e) {
-        container.innerHTML = '<div style="padding:40px;text-align:center;color:var(--danger);">Erro ao carregar convites do radar.</div>';
-      }
-    }
-
-    function renderRadarList() {
-      const container = document.getElementById('radarList');
-      const q = (document.getElementById('radarSearch').value || '').toLowerCase().trim();
-      
-      const filtered = radarInvitesList.filter(inv => {
-        const name = (inv.groupMeta?.subject || inv.code || '').toLowerCase();
-        const desc = (inv.groupMeta?.desc || '').toLowerCase();
-        const origin = (inv.groupName || '').toLowerCase();
-        return name.includes(q) || desc.includes(q) || origin.includes(q);
-      });
-
-      if (radarInvitesList.length === 0) {
-        container.innerHTML = \`
-          <div style="padding:48px 24px;text-align:center;background:var(--card);border-radius:14px;border:1px dashed var(--border);">
-            <div style="font-size:36px;margin-bottom:10px;">📡</div>
-            <div style="font-size:15px;font-weight:700;color:#fff;margin-bottom:6px;">Radar Monitorando Ativamente</div>
-            <div style="font-size:13px;color:var(--muted);max-width:500px;margin:0 auto;line-height:1.5;">
-              Assim que qualquer membro divulgar links de convite de grupos de desapego, vendas ou trocas dentro dos seus 374 grupos atuais, eles aparecerão aqui com botão de entrada para você analisar!
-            </div>
-          </div>
-        \`;
-        return;
-      }
-
-      if (filtered.length === 0) {
-        container.innerHTML = '<div style="padding:30px;text-align:center;color:var(--muted);">Nenhum grupo encontrado com esse filtro.</div>';
-        return;
-      }
-
-      container.innerHTML = filtered.map(inv => {
-        const title = inv.groupMeta?.subject || 'Grupo de WhatsApp (' + inv.code + ')';
-        const size = inv.groupMeta?.size ? inv.groupMeta.size + ' membros' : 'Membros não informados';
-        const desc = inv.groupMeta?.desc ? inv.groupMeta.desc.replace(/\\n/g, '<br/>') : 'Sem descrição informada.';
-        const origin = inv.groupName ? 'Encontrado no grupo: "' + inv.groupName + '"' : '';
-
-        return \`
-          <div class="radar-card">
-            <div class="radar-card-content">
-              <div class="radar-name">\${title} <span style="font-size:12px;color:var(--green);font-weight:600;margin-left:8px;">👥 \${size}</span></div>
-              <div class="radar-desc">\${desc.slice(0, 180)}</div>
-              \${origin ? '<div class="radar-origin">📍 ' + origin + '</div>' : ''}
-            </div>
-            <div class="radar-card-action">
-              <a href="\${inv.url}" target="_blank" rel="noopener noreferrer" class="radar-join-btn">
-                🔗 Entrar pelo WhatsApp
-              </a>
-            </div>
-          </div>
-        \`;
-      }).join('');
     }
 
     let adsList = [];
@@ -2922,19 +2812,21 @@ app.get(["/", "/qr"], async (req, res) => {
           sub.innerText = (data.name || 'Cledson') + ' • Sessão Ativa na VPS';
           qrSec.style.display = 'none';
           
-          // Respeita a aba atual que o usuário está navegando (Disparador, Banco de Anúncios ou Radar)
+          // Respeita a aba atual que o usuário está navegando (Disparador, Banco de Anúncios ou Chat IA)
+          const galeriaSec = document.getElementById('galeriaSection');
+          const chatSec = document.getElementById('chatSection');
           if (currentMainView === 'disparo') {
             appSec.style.display = 'grid';
-            document.getElementById('galeriaSection').style.display = 'none';
-            document.getElementById('radarSection').style.display = 'none';
+            if (galeriaSec) galeriaSec.style.display = 'none';
+            if (chatSec) chatSec.style.display = 'none';
           } else if (currentMainView === 'galeria') {
             appSec.style.display = 'none';
-            document.getElementById('galeriaSection').style.display = 'block';
-            document.getElementById('radarSection').style.display = 'none';
-          } else {
+            if (galeriaSec) galeriaSec.style.display = 'block';
+            if (chatSec) chatSec.style.display = 'none';
+          } else if (currentMainView === 'chat') {
             appSec.style.display = 'none';
-            document.getElementById('galeriaSection').style.display = 'none';
-            document.getElementById('radarSection').style.display = 'block';
+            if (galeriaSec) galeriaSec.style.display = 'none';
+            if (chatSec) chatSec.style.display = 'block';
           }
 
           if (adsList.length === 0 && Array.isArray(data.ads)) {
@@ -3027,6 +2919,28 @@ app.get(["/", "/qr"], async (req, res) => {
       }
     }
 
+    async function startNewChatPrompt() {
+      const phone = prompt('Digite o número do WhatsApp do cliente com DDD (ex: 11987654321):');
+      if (!phone || !phone.trim()) return;
+      const name = prompt('Nome do cliente (opcional):') || '';
+      try {
+        const res = await fetch('/chats/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ phone: phone.trim(), name: name.trim() })
+        });
+        const data = await res.json();
+        if (data.success && data.chat) {
+          await loadChatConversations(false);
+          selectChat(data.chat.jid);
+        } else {
+          alert('Erro ao iniciar conversa: ' + (data.error || 'Falha'));
+        }
+      } catch (err) {
+        alert('Erro ao iniciar conversa: ' + err.message);
+      }
+    }
+
     function renderChatConversationsList() {
       const container = document.getElementById('chatConversationsList');
       if (!container) return;
@@ -3034,7 +2948,7 @@ app.get(["/", "/qr"], async (req, res) => {
       const filtered = chatsList.filter(c => (c.name || '').toLowerCase().includes(q) || (c.number || '').includes(q) || (c.lastMessage || '').toLowerCase().includes(q));
 
       if (chatsList.length === 0) {
-        container.innerHTML = '<div style="padding:28px 14px;text-align:center;color:var(--muted);font-size:12.5px;">Nenhuma conversa privada registrada ainda. Assim que um cliente mandar mensagem, ela aparecerá aqui!</div>';
+        container.innerHTML = '<div style="padding:28px 14px;text-align:center;color:var(--muted);font-size:12.5px;"><div style="font-size:26px;margin-bottom:8px;">💬</div>Nenhuma conversa privada registrada ainda.<br/><br/><button class="btn" style="background:var(--green);color:#0b141a;font-weight:700;padding:8px 14px;border:none;" onclick="startNewChatPrompt()">➕ Iniciar Conversa com Número</button></div>';
         return;
       }
       if (filtered.length === 0) {
