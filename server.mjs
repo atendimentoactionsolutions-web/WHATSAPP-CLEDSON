@@ -31,6 +31,7 @@ const logger = pino({ level: "silent" });
 const defaultConfig = {
   selectedGroups: [],
   hiddenGroups: [],
+  geminiApiKey: process.env.GEMINI_API_KEY || "",
   minDelaySec: 15,
   maxDelaySec: 30,
   shuffleGroups: true,
@@ -144,6 +145,97 @@ try {
 function saveRadarInvites() {
   try {
     fs.writeFileSync(RADAR_CACHE_FILE, JSON.stringify(Array.from(detectedInvites.values()), null, 2));
+  } catch (e) {}
+}
+
+// ─── Armazenamento de Conversas Privadas para Atendimento com IA ───
+const CHATS_FILE = path.join(DATA_DIR, "conversations.json");
+let conversations = [];
+
+function loadConversations() {
+  try {
+    if (fs.existsSync(CHATS_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(CHATS_FILE, "utf-8"));
+      if (Array.isArray(parsed)) conversations = parsed;
+    }
+  } catch (e) {
+    conversations = [];
+  }
+}
+loadConversations();
+
+let saveChatsTimeout = null;
+function saveConversations() {
+  clearTimeout(saveChatsTimeout);
+  saveChatsTimeout = setTimeout(() => {
+    try {
+      fs.writeFileSync(CHATS_FILE, JSON.stringify(conversations, null, 2));
+    } catch (e) {}
+  }, 800);
+}
+
+function savePrivateMessageToChat(msg) {
+  try {
+    if (!msg || !msg.key || !msg.key.remoteJid) return;
+    const remoteJid = msg.key.remoteJid;
+    if (remoteJid.endsWith("@g.us") || remoteJid.includes("broadcast") || remoteJid.includes("@newsletter")) return;
+
+    const m = msg.message;
+    if (!m) return;
+    const text =
+      m.conversation ||
+      m.extendedTextMessage?.text ||
+      m.imageMessage?.caption ||
+      m.videoMessage?.caption ||
+      m.documentMessage?.caption ||
+      "";
+
+    if (!text && !m.imageMessage && !m.audioMessage && !m.documentMessage) return;
+
+    const fromMe = !!msg.key.fromMe;
+    const pushName = msg.pushName || "";
+    const cleanNumber = remoteJid.split("@")[0];
+    const timestamp = msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now();
+    const msgId = msg.key.id || `msg_${Date.now()}`;
+    const displaySnippet = text || (m.imageMessage ? "📷 [Foto]" : m.audioMessage ? "🎵 [Áudio]" : "📄 [Arquivo]");
+
+    let conv = conversations.find((c) => c.jid === remoteJid);
+    if (!conv) {
+      conv = {
+        jid: remoteJid,
+        name: pushName || `+${cleanNumber}`,
+        number: cleanNumber,
+        lastMessage: displaySnippet,
+        lastTimestamp: timestamp,
+        unreadCount: fromMe ? 0 : 1,
+        messages: [],
+      };
+      conversations.unshift(conv);
+    } else {
+      if (pushName && conv.name.startsWith("+")) conv.name = pushName;
+      conv.lastMessage = displaySnippet;
+      conv.lastTimestamp = timestamp;
+      if (!fromMe) conv.unreadCount = (conv.unreadCount || 0) + 1;
+      conversations = [conv, ...conversations.filter((c) => c.jid !== remoteJid)];
+    }
+
+    if (!conv.messages.some((existing) => existing.id === msgId)) {
+      conv.messages.push({
+        id: msgId,
+        fromMe,
+        text: displaySnippet,
+        timestamp,
+      });
+      if (conv.messages.length > 60) {
+        conv.messages = conv.messages.slice(-60);
+      }
+    }
+
+    if (conversations.length > 100) {
+      conversations = conversations.slice(0, 100);
+    }
+
+    saveConversations();
   } catch (e) {}
 }
 
@@ -782,6 +874,7 @@ async function initWhatsApp(forceReset = false) {
         if (!Array.isArray(messages)) return;
         for (const m of messages) {
           saveMessageToStore(m);
+          savePrivateMessageToChat(m);
           if (!m.key?.fromMe || !m.message) continue;
           const remoteJid = m.key.remoteJid || "";
           if (remoteJid.endsWith("@g.us") || remoteJid.includes("broadcast")) continue;
@@ -1062,7 +1155,10 @@ app.post("/groups/leave", async (req, res) => {
 
 // POST /config
 app.post("/config", (req, res) => {
-  const { selectedGroups, hiddenGroups, minDelaySec, maxDelaySec, shuffleGroups, simulateTyping, rotationMode } = req.body;
+  const { selectedGroups, hiddenGroups, geminiApiKey, minDelaySec, maxDelaySec, shuffleGroups, simulateTyping, rotationMode } = req.body;
+  if (typeof geminiApiKey === "string") {
+    appConfig.geminiApiKey = geminiApiKey.trim();
+  }
   if (Array.isArray(hiddenGroups)) {
     appConfig.hiddenGroups = hiddenGroups;
   }
@@ -1147,6 +1243,137 @@ app.post("/broadcast/stop", (req, res) => {
 app.post("/reset", async (req, res) => {
   await initWhatsApp(true).catch(() => {});
   res.json({ success: true, message: "Sessão reiniciada." });
+});
+
+// ─── Rotas de Atendimento & Copiloto IA ─────────────────────────────────
+// GET /chats
+app.get("/chats", (req, res) => {
+  const list = conversations.map((c) => ({
+    jid: c.jid,
+    name: c.name,
+    number: c.number,
+    lastMessage: c.lastMessage,
+    lastTimestamp: c.lastTimestamp,
+    unreadCount: c.unreadCount || 0,
+    messagesCount: c.messages?.length || 0,
+  }));
+  res.json({ success: true, chats: list });
+});
+
+// GET /chats/:jid
+app.get("/chats/:jid", (req, res) => {
+  const { jid } = req.params;
+  const conv = conversations.find((c) => c.jid === jid);
+  if (!conv) {
+    return res.json({
+      success: true,
+      chat: {
+        jid,
+        name: jid.split("@")[0],
+        number: jid.split("@")[0],
+        messages: [],
+      },
+    });
+  }
+  conv.unreadCount = 0;
+  saveConversations();
+  res.json({ success: true, chat: conv });
+});
+
+// POST /chats/send
+app.post("/chats/send", async (req, res) => {
+  try {
+    const { jid, text } = req.body;
+    if (!jid || !text || !text.trim()) {
+      return res.status(400).json({ success: false, error: "JID e mensagem são obrigatórios." });
+    }
+    if (!waSocket || waStatus !== "CONNECTED") {
+      return res.status(503).json({ success: false, error: "WhatsApp não está conectado no momento." });
+    }
+
+    const sentMsg = await waSocket.sendMessage(jid, { text: text.trim() });
+    saveMessageToStore(sentMsg);
+    savePrivateMessageToChat(sentMsg);
+
+    res.json({ success: true, messageId: sentMsg.key?.id });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /ai/formulate
+app.post("/ai/formulate", async (req, res) => {
+  try {
+    const { jid, instruction, clientMessage } = req.body;
+    if (!instruction || !instruction.trim()) {
+      return res.status(400).json({ success: false, error: "Digite o que você deseja responder para a IA formular." });
+    }
+
+    const apiKey = appConfig.geminiApiKey || process.env.GEMINI_API_KEY || "";
+    if (!apiKey) {
+      return res.status(400).json({ success: false, error: "Chave do Google Gemini não configurada." });
+    }
+
+    let conversationContext = "";
+    if (jid) {
+      const conv = conversations.find((c) => c.jid === jid);
+      if (conv && Array.isArray(conv.messages) && conv.messages.length > 0) {
+        const lastFew = conv.messages.slice(-6);
+        conversationContext = lastFew
+          .map((m) => `${m.fromMe ? "LOJISTA" : "CLIENTE"}: "${m.text}"`)
+          .join("\n");
+      }
+    }
+
+    const prompt = `Você é o Copiloto Vendedor via WhatsApp da loja Mundo Apple (venda de iPhones, iPads, MacBooks, Apple Watch e eletrônicos).
+Seu objetivo é formular uma mensagem pronta e perfeita para o lojista enviar ao cliente no WhatsApp.
+
+Diretrizes Obrigatórias:
+- Escreva em português do Brasil natural, educado, simpático e vendedor (sem soar robótico).
+- Use formatação bonita para o WhatsApp: use negrito (*exemplo*) nos pontos-chave e emojis com moderação.
+- Destaque valores, formas de pagamento, garantia e facilidades.
+- Retorne APENAS o texto exato da mensagem pronta para ser enviada ao cliente (sem introduções, sem explicações e sem aspas no início ou fim).
+
+${conversationContext ? `HISTÓRICO RECENTE DA CONVERSA:\n${conversationContext}\n` : clientMessage ? `MENSAGEM DO CLIENTE:\n"${clientMessage}"\n` : ""}
+O QUE O LOJISTA MANDOU RESPONDER (INSTRUÇÃO):
+"${instruction.trim()}"
+
+RESPOSTA PRONTA PARA O WHATSAPP:`;
+
+    const models = ["gemini-flash-lite-latest", "gemini-3.5-flash-lite", "gemini-3.6-flash"];
+    let lastErr = null;
+
+    for (const model of models) {
+      try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+        const aiRes = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+          }),
+          signal: AbortSignal.timeout(12000),
+        });
+
+        if (!aiRes.ok) {
+          lastErr = new Error(`HTTP ${aiRes.status}`);
+          continue;
+        }
+
+        const data = await aiRes.json();
+        const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (text && text.trim()) {
+          return res.json({ success: true, text: text.trim(), model });
+        }
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+
+    return res.status(500).json({ success: false, error: "Falha ao formular com a IA: " + (lastErr?.message || "Tente novamente") });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
 });
 
 // GET /qr.png
@@ -1547,6 +1774,29 @@ app.get(["/", "/qr"], async (req, res) => {
     .log-entry.ERROR { color: #f87171; }
     .log-entry.WARN { color: #fbbf24; }
     .log-entry.INFO, .log-entry.DONE { color: #93c5fd; }
+
+    /* Estilos de Atendimento & Chat com Copiloto IA */
+    .chat-conv-item {
+      display: flex; align-items: center; gap: 12px; padding: 12px 14px;
+      border-bottom: 1px solid var(--border); cursor: pointer; transition: 0.15s;
+    }
+    .chat-conv-item:hover { background: rgba(255,255,255,0.03); }
+    .chat-conv-item.active { background: rgba(37, 211, 102, 0.08); border-left: 3px solid var(--green); }
+    .chat-conv-name { font-size: 13.5px; font-weight: 700; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .chat-conv-preview { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
+    .chat-unread-badge { background: var(--green); color: #0b141a; font-size: 10.5px; font-weight: 700; padding: 2px 7px; border-radius: 999px; }
+    .chat-bubble {
+      max-width: 74%; padding: 10px 14px; font-size: 13.5px; line-height: 1.45; word-wrap: break-word; white-space: pre-wrap; position: relative;
+    }
+    .chat-bubble.in {
+      align-self: flex-start; background: #202c33; color: #e9edef; border-radius: 12px 12px 12px 2px;
+    }
+    .chat-bubble.out {
+      align-self: flex-end; background: #005c4b; color: #e9edef; border-radius: 12px 12px 2px 12px;
+    }
+    .chat-bubble-time {
+      font-size: 10.5px; color: rgba(255,255,255,0.55); margin-top: 4px; text-align: right;
+    }
   </style>
 </head>
 <body>
@@ -1567,6 +1817,9 @@ app.get(["/", "/qr"], async (req, res) => {
           </button>
           <button class="nav-tab" id="tabNavRadar" onclick="switchMainView('radar')">
             🎯 Radar de Novos Grupos <span id="radarBadge" class="radar-badge" style="display:none;">0</span>
+          </button>
+          <button class="nav-tab" id="tabNavChat" onclick="switchMainView('chat')">
+            💬 Atendimento & Chat IA <span id="chatBadge" class="radar-badge" style="display:none;background:#25d366;color:#0b141a;">0</span>
           </button>
         </div>
         <div id="statusPill" class="status-pill wait">⏳ Conectando...</div>
@@ -1774,6 +2027,81 @@ app.get(["/", "/qr"], async (req, res) => {
         </div>
       </div>
     </div>
+
+    <!-- ABA 4: ATENDIMENTO & CHAT COM IA -->
+    <div id="chatSection" class="panel" style="display:none;margin-top:20px;padding:0;overflow:hidden;border-radius:14px;border:1px solid var(--border);">
+      <div style="display:flex;height:650px;">
+        <!-- Coluna Esquerda: Lista de Conversas -->
+        <div style="width:330px;border-right:1px solid var(--border);display:flex;flex-direction:column;background:var(--card-2);flex-shrink:0;">
+          <div style="padding:14px;border-bottom:1px solid var(--border);">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+              <strong style="font-size:14.5px;color:#fff;">💬 Clientes Privados</strong>
+              <button class="btn" style="padding:4px 8px;font-size:11.5px;" onclick="loadChatConversations(true)">🔄 Atualizar</button>
+            </div>
+            <input type="text" id="chatSearchInput" class="group-search" placeholder="🔍 Buscar por nome ou número..." oninput="renderChatConversationsList()" style="width:100%;box-sizing:border-box;font-size:12.5px;padding:8px 10px;" />
+          </div>
+          <div id="chatConversationsList" style="flex:1;overflow-y:auto;">
+            <!-- Itens de conversa -->
+          </div>
+        </div>
+
+        <!-- Coluna Direita: Conversa Aberta + Copiloto IA -->
+        <div style="flex:1;display:flex;flex-direction:column;background:var(--card);min-width:0;">
+          <!-- Topo da Conversa -->
+          <div id="chatHeader" style="padding:12px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;background:var(--card-2);height:58px;box-sizing:border-box;">
+            <div style="display:flex;align-items:center;gap:10px;">
+              <div style="width:36px;height:36px;border-radius:50%;background:#202c33;display:flex;align-items:center;justify-content:center;font-size:16px;">
+                👤
+              </div>
+              <div>
+                <div id="chatActiveContactName" style="font-size:14px;font-weight:700;color:#fff;">Selecione uma conversa</div>
+                <div id="chatActiveContactNumber" style="font-size:11.5px;color:var(--muted);">Nenhum cliente selecionado</div>
+              </div>
+            </div>
+            <div id="chatHeaderActions" style="display:none;">
+              <a id="chatDirectWaLink" href="#" target="_blank" rel="noopener noreferrer" class="btn" style="text-decoration:none;font-size:12px;padding:6px 12px;color:var(--green);border-color:rgba(37,211,102,0.3);">
+                🔗 Abrir no WhatsApp
+              </a>
+            </div>
+          </div>
+
+          <!-- Feed de Mensagens -->
+          <div id="chatMessagesFeed" style="flex:1;overflow-y:auto;padding:16px 20px;display:flex;flex-direction:column;gap:10px;background:#0b141a;">
+            <div style="margin:auto;text-align:center;color:var(--muted);font-size:13px;max-width:320px;">
+              <div style="font-size:32px;margin-bottom:8px;">💬</div>
+              Selecione uma conversa ao lado para visualizar o histórico e responder com ajuda da IA.
+            </div>
+          </div>
+
+          <!-- Rodapé de Envio e Copiloto IA -->
+          <div id="chatInputArea" style="border-top:1px solid var(--border);background:var(--card-2);padding:12px 16px;display:none;">
+            <!-- Barra do Copiloto IA -->
+            <div style="background:rgba(56,189,248,0.06);border:1px solid rgba(56,189,248,0.25);border-radius:10px;padding:10px 12px;margin-bottom:10px;">
+              <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
+                <span style="font-size:14px;">✨</span>
+                <strong style="font-size:12.5px;color:#38bdf8;">Copiloto IA — O que você deseja responder ao cliente?</strong>
+              </div>
+              <div style="display:flex;gap:8px;">
+                <input type="text" id="aiInstructionInput" placeholder="Ex: tenho o 15 Pro 128gb lacrado por 4800 à vista e parcelo em 18x..." style="flex:1;background:#0b141a;border:1px solid var(--border);color:#fff;padding:8px 12px;border-radius:8px;font-size:13px;" onkeydown="if(event.key==='Enter') formulateWithAI()" />
+                <button id="btnAiFormulate" class="btn" style="background:#38bdf8;color:#0b141a;font-weight:700;white-space:nowrap;padding:8px 14px;border:none;border-radius:8px;cursor:pointer;" onclick="formulateWithAI()">
+                  ✨ Formular com IA
+                </button>
+              </div>
+            </div>
+
+            <!-- Caixa de Texto Final & Botão de Envio -->
+            <div style="display:flex;gap:10px;align-items:flex-end;">
+              <textarea id="chatReplyText" rows="3" placeholder="Digite sua resposta aqui ou use a IA acima para formular automaticamente..." style="flex:1;background:#0b141a;border:1px solid var(--border);color:#fff;padding:10px 12px;border-radius:10px;font-size:13.5px;resize:none;font-family:inherit;line-height:1.4;" onkeydown="if(event.key==='Enter' && !event.shiftKey){ event.preventDefault(); sendChatMessage(); }"></textarea>
+              <button id="btnSendReply" class="btn" style="background:var(--green);color:#0b141a;font-weight:700;padding:12px 18px;height:72px;border-radius:10px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;border:none;cursor:pointer;" onclick="sendChatMessage()">
+                <span style="font-size:18px;">🚀</span>
+                <span style="font-size:12px;">Enviar</span>
+              </button>
+            </div>
+            <span style="font-size:11px;color:var(--muted);display:block;margin-top:4px;">Dica: Pressione <strong>Enter</strong> para enviar direto, ou <strong>Shift+Enter</strong> para pular linha.</span>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- MODAL PARA EDITAR / CRIAR ANÚNCIO DIRETO NA GALERIA -->
@@ -1829,35 +2157,49 @@ app.get(["/", "/qr"], async (req, res) => {
   </div>
 
   <script>
-    let currentMainView = 'disparo'; // 'disparo' | 'galeria' | 'radar'
+    let currentMainView = 'disparo'; // 'disparo' | 'galeria' | 'radar' | 'chat'
     let radarInvitesList = [];
+    let chatsList = [];
+    let activeChatJid = null;
 
     function switchMainView(view) {
       currentMainView = view;
       document.getElementById('tabNavDisparo').className = 'nav-tab' + (view === 'disparo' ? ' active' : '');
       document.getElementById('tabNavGaleria').className = 'nav-tab' + (view === 'galeria' ? ' active' : '');
       document.getElementById('tabNavRadar').className = 'nav-tab' + (view === 'radar' ? ' active' : '');
+      const chatNav = document.getElementById('tabNavChat');
+      if (chatNav) chatNav.className = 'nav-tab' + (view === 'chat' ? ' active' : '');
       
       const appSec = document.getElementById('appSection');
       const galeriaSec = document.getElementById('galeriaSection');
       const radarSec = document.getElementById('radarSection');
+      const chatSec = document.getElementById('chatSection');
       
       if (view === 'disparo') {
         appSec.style.display = 'grid';
         galeriaSec.style.display = 'none';
         radarSec.style.display = 'none';
+        if (chatSec) chatSec.style.display = 'none';
         renderTabs();
         loadCurrentAdIntoEditor();
       } else if (view === 'galeria') {
         appSec.style.display = 'none';
         galeriaSec.style.display = 'block';
         radarSec.style.display = 'none';
+        if (chatSec) chatSec.style.display = 'none';
         renderGalleryGrid();
-      } else {
+      } else if (view === 'radar') {
         appSec.style.display = 'none';
         galeriaSec.style.display = 'none';
         radarSec.style.display = 'block';
+        if (chatSec) chatSec.style.display = 'none';
         loadRadarInvites();
+      } else if (view === 'chat') {
+        appSec.style.display = 'none';
+        galeriaSec.style.display = 'none';
+        radarSec.style.display = 'none';
+        if (chatSec) chatSec.style.display = 'block';
+        loadChatConversations(true);
       }
     }
 
@@ -2662,8 +3004,212 @@ app.get(["/", "/qr"], async (req, res) => {
       }
     }
 
+    // ─── Atendimento & Copiloto IA ──────────────────────────────────────────
+    async function loadChatConversations(manual = false) {
+      try {
+        const res = await fetch('/chats');
+        const data = await res.json();
+        if (data.success && Array.isArray(data.chats)) {
+          chatsList = data.chats;
+          const totalUnread = chatsList.reduce((acc, c) => acc + (c.unreadCount || 0), 0);
+          const badge = document.getElementById('chatBadge');
+          if (badge) {
+            badge.innerText = totalUnread;
+            badge.style.display = totalUnread > 0 ? 'inline-block' : 'none';
+          }
+          renderChatConversationsList();
+          if (activeChatJid) {
+            loadActiveChatMessages(activeChatJid, false);
+          }
+        }
+      } catch (e) {
+        console.error('Erro ao carregar conversas:', e);
+      }
+    }
+
+    function renderChatConversationsList() {
+      const container = document.getElementById('chatConversationsList');
+      if (!container) return;
+      const q = (document.getElementById('chatSearchInput')?.value || '').toLowerCase().trim();
+      const filtered = chatsList.filter(c => (c.name || '').toLowerCase().includes(q) || (c.number || '').includes(q) || (c.lastMessage || '').toLowerCase().includes(q));
+
+      if (chatsList.length === 0) {
+        container.innerHTML = '<div style="padding:28px 14px;text-align:center;color:var(--muted);font-size:12.5px;">Nenhuma conversa privada registrada ainda. Assim que um cliente mandar mensagem, ela aparecerá aqui!</div>';
+        return;
+      }
+      if (filtered.length === 0) {
+        container.innerHTML = '<div style="padding:20px 14px;text-align:center;color:var(--muted);font-size:12.5px;">Nenhum cliente corresponde à busca.</div>';
+        return;
+      }
+
+      container.innerHTML = filtered.map(c => {
+        const isSel = c.jid === activeChatJid;
+        const timeStr = c.lastTimestamp ? new Date(c.lastTimestamp).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '';
+        const safeName = (c.name || 'Cliente').replace(/"/g, '&quot;');
+        const safeSnippet = (c.lastMessage || 'Conversa iniciada').replace(/"/g, '&quot;');
+        return \`
+          <div class="chat-conv-item \${isSel ? 'active' : ''}" onclick="selectChat('\${c.jid}')">
+            <div style="width:38px;height:38px;border-radius:50%;background:#202c33;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;">
+              👤
+            </div>
+            <div style="flex:1;min-width:0;">
+              <div style="display:flex;justify-content:space-between;align-items:baseline;">
+                <span class="chat-conv-name" title="\${safeName}">\${safeName}</span>
+                <span style="font-size:10.5px;color:var(--muted);">\${timeStr}</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-top:2px;">
+                <span class="chat-conv-preview" title="\${safeSnippet}">\${safeSnippet}</span>
+                \${c.unreadCount > 0 ? \`<span class="chat-unread-badge">\${c.unreadCount}</span>\` : ''}
+              </div>
+            </div>
+          </div>
+        \`;
+      }).join('');
+    }
+
+    async function selectChat(jid) {
+      activeChatJid = jid;
+      renderChatConversationsList();
+      const inputArea = document.getElementById('chatInputArea');
+      const headerActions = document.getElementById('chatHeaderActions');
+      if (inputArea) inputArea.style.display = 'block';
+      if (headerActions) headerActions.style.display = 'block';
+
+      const conv = chatsList.find(c => c.jid === jid);
+      if (conv) {
+        document.getElementById('chatActiveContactName').innerText = conv.name || 'Cliente';
+        document.getElementById('chatActiveContactNumber').innerText = conv.number ? '+' + conv.number : jid.split('@')[0];
+        document.getElementById('chatDirectWaLink').href = 'https://wa.me/' + (conv.number || jid.split('@')[0]);
+      }
+
+      await loadActiveChatMessages(jid, true);
+    }
+
+    async function loadActiveChatMessages(jid, shouldScroll = true) {
+      if (!jid) return;
+      try {
+        const res = await fetch('/chats/' + encodeURIComponent(jid));
+        const data = await res.json();
+        if (data.success && data.chat) {
+          renderChatMessages(data.chat.messages || []);
+          if (shouldScroll) {
+            const feed = document.getElementById('chatMessagesFeed');
+            if (feed) feed.scrollTop = feed.scrollHeight;
+          }
+        }
+      } catch (e) {
+        console.error('Erro ao buscar mensagens do chat:', e);
+      }
+    }
+
+    function renderChatMessages(messages) {
+      const feed = document.getElementById('chatMessagesFeed');
+      if (!feed) return;
+      if (!messages || messages.length === 0) {
+        feed.innerHTML = '<div style="margin:auto;text-align:center;color:var(--muted);font-size:13px;">Nenhuma mensagem registrada nesta conversa. Digite abaixo ou use a IA para formular uma resposta!</div>';
+        return;
+      }
+
+      feed.innerHTML = messages.map(m => {
+        const timeStr = m.timestamp ? new Date(m.timestamp).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '';
+        const isMe = !!m.fromMe;
+        const textFormatted = (m.text || '')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/\\*(.*?)\\*/g, '<strong>$1</strong>');
+        return \`
+          <div class="chat-bubble \${isMe ? 'out' : 'in'}">
+            <div>\${textFormatted}</div>
+            <div class="chat-bubble-time">\${timeStr} \${isMe ? '✓✓' : ''}</div>
+          </div>
+        \`;
+      }).join('');
+    }
+
+    async function formulateWithAI() {
+      const instructionInput = document.getElementById('aiInstructionInput');
+      const instruction = instructionInput.value.trim();
+      if (!instruction) {
+        alert('Digite o que você deseja responder para a IA formular!');
+        instructionInput.focus();
+        return;
+      }
+
+      const btn = document.getElementById('btnAiFormulate');
+      const originalText = btn.innerText;
+      btn.innerText = '⏳ Formulando com IA...';
+      btn.disabled = true;
+
+      try {
+        const res = await fetch('/ai/formulate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jid: activeChatJid,
+            instruction: instruction
+          })
+        });
+        const data = await res.json();
+        if (data.success && data.text) {
+          const replyText = document.getElementById('chatReplyText');
+          replyText.value = data.text;
+          replyText.focus();
+          instructionInput.value = '';
+        } else {
+          alert('Erro ao formular com a IA: ' + (data.error || 'Falha na resposta'));
+        }
+      } catch (err) {
+        alert('Erro ao conectar com a IA: ' + err.message);
+      } finally {
+        btn.innerText = originalText;
+        btn.disabled = false;
+      }
+    }
+
+    async function sendChatMessage() {
+      const replyTextArea = document.getElementById('chatReplyText');
+      const text = replyTextArea.value.trim();
+      if (!text) return;
+      if (!activeChatJid) {
+        alert('Selecione um cliente para enviar a mensagem!');
+        return;
+      }
+
+      const btn = document.getElementById('btnSendReply');
+      btn.disabled = true;
+
+      try {
+        const res = await fetch('/chats/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jid: activeChatJid,
+            text: text
+          })
+        });
+        const data = await res.json();
+        if (data.success) {
+          replyTextArea.value = '';
+          await loadActiveChatMessages(activeChatJid, true);
+          loadChatConversations(false);
+        } else {
+          alert('Erro ao enviar mensagem: ' + (data.error || 'Falha ao enviar'));
+        }
+      } catch (e) {
+        alert('Erro ao enviar: ' + e.message);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
     pollStatus();
     setInterval(pollStatus, 2000);
+    setInterval(() => {
+      if (currentMainView === 'chat') {
+        loadChatConversations(false);
+      }
+    }, 4000);
   </script>
 </body>
 </html>`);
