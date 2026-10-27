@@ -1113,7 +1113,10 @@ app.get(["/", "/qr"], async (req, res) => {
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="format-detection" content="telephone=no" />
   <title>WhatsApp Cledson — Disparador Multi-Anúncios Anti-Ban</title>
   <style>
     :root {
@@ -1128,13 +1131,30 @@ app.get(["/", "/qr"], async (req, res) => {
       --danger: #ef4444;
       --warn: #f59e0b;
     }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      -webkit-tap-highlight-color: transparent;
+    }
+    html {
+      -webkit-text-size-adjust: 100%;
+      text-size-adjust: 100%;
+      width: 100%;
+      max-width: 100%;
+      overflow-x: hidden;
+    }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       background: var(--bg);
       color: var(--text);
       min-height: 100vh;
-      padding: 20px;
+      min-height: 100dvh;
+      padding: env(safe-area-inset-top, 16px) env(safe-area-inset-right, 16px) env(safe-area-inset-bottom, 16px) env(safe-area-inset-left, 16px);
+      overflow-x: hidden;
+      width: 100%;
+      max-width: 100%;
+      -webkit-font-smoothing: antialiased;
     }
     .container { max-width: 1200px; margin: 0 auto; width: 100%; }
     header {
@@ -1469,7 +1489,7 @@ app.get(["/", "/qr"], async (req, res) => {
     .log-entry.WARN { color: #fbbf24; }
     .log-entry.INFO, .log-entry.DONE { color: #93c5fd; }
 
-    /* ─── Responsividade Mobile Completa ─── */
+    /* ─── Responsividade Mobile Completa (Otimizado para iPhone / iOS Safari e Android) ─── */
     .header-right-actions { display: flex; align-items: center; gap: 10px; }
     .header-status-box { display: flex; align-items: center; gap: 10px; }
     .main-nav { display: flex; background: var(--card-2); border: 1px solid var(--border); border-radius: 12px; padding: 4px; }
@@ -1479,13 +1499,34 @@ app.get(["/", "/qr"], async (req, res) => {
     }
 
     @media (max-width: 768px) {
+      /* PREVENÇÃO DO ZOOM AUTOMÁTICO DO IPHONE/SAFARI:
+         No iOS, qualquer input/textarea/select com font-size < 16px força zoom involuntário da tela,
+         jogando cabeçalhos e botões para fora da visualização. Fixamos 16px para estabilidade nativa. */
+      input[type="text"],
+      input[type="number"],
+      input[type="search"],
+      textarea,
+      select {
+        font-size: 16px !important;
+        -webkit-appearance: none;
+        border-radius: 10px;
+      }
+
+      button, .btn, .nav-tab, .tab-btn, .select-tag, .group-item, .btn-hide-group, .btn-unhide-group {
+        touch-action: manipulation;
+        -webkit-tap-highlight-color: transparent;
+      }
+
       body {
-        padding: 8px;
+        padding: 10px 8px env(safe-area-inset-bottom, 12px) 8px;
         font-size: 13px;
         overflow-x: hidden;
+        width: 100%;
+        max-width: 100vw;
       }
       .container {
         width: 100%;
+        max-width: 100%;
         overflow-x: hidden;
       }
 
@@ -1497,9 +1538,14 @@ app.get(["/", "/qr"], async (req, res) => {
         padding: 12px 14px;
         margin-bottom: 14px;
         border-radius: 14px;
+        width: 100%;
+        box-sizing: border-box;
       }
       .brand {
+        display: flex;
+        align-items: center;
         gap: 10px;
+        width: 100%;
       }
       .brand-icon {
         width: 38px;
@@ -1509,8 +1555,9 @@ app.get(["/", "/qr"], async (req, res) => {
         flex-shrink: 0;
       }
       .brand h1 {
-        font-size: 15px;
+        font-size: 14.5px;
         line-height: 1.25;
+        word-break: break-word;
       }
       .brand p {
         font-size: 11.5px;
@@ -1524,15 +1571,18 @@ app.get(["/", "/qr"], async (req, res) => {
       .main-nav {
         width: 100%;
         display: flex;
+        gap: 4px;
       }
       .main-nav .nav-tab {
         flex: 1;
         text-align: center;
         justify-content: center;
-        padding: 8px 6px;
+        padding: 10px 6px;
         font-size: 12px;
+        min-height: 40px;
         display: flex;
         align-items: center;
+        white-space: nowrap;
       }
       .header-status-box {
         display: flex;
@@ -1542,24 +1592,30 @@ app.get(["/", "/qr"], async (req, res) => {
         gap: 8px;
       }
       .status-pill {
-        padding: 6px 12px;
+        padding: 8px 10px;
         font-size: 11.5px;
         flex: 1;
+        min-width: 0;
         justify-content: center;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
+        min-height: 36px;
       }
       .header-status-box .btn {
-        padding: 6px 12px;
+        padding: 8px 12px;
         font-size: 11.5px;
         white-space: nowrap;
+        flex-shrink: 0;
+        min-height: 36px;
       }
 
       /* Painéis no Mobile */
       .panel {
         padding: 14px 12px;
         border-radius: 14px;
+        width: 100%;
+        box-sizing: border-box;
       }
       .panel-title {
         flex-direction: column;
@@ -1584,8 +1640,9 @@ app.get(["/", "/qr"], async (req, res) => {
         flex-wrap: nowrap;
         overflow-x: auto;
         -webkit-overflow-scrolling: touch;
-        padding-bottom: 6px;
+        padding-bottom: 8px;
         margin-bottom: 12px;
+        width: 100%;
       }
       .tabs-bar::-webkit-scrollbar {
         height: 4px;
@@ -1596,76 +1653,129 @@ app.get(["/", "/qr"], async (req, res) => {
       }
       .tab-btn {
         flex-shrink: 0;
-        padding: 7px 11px;
-        font-size: 12px;
+        padding: 8px 12px;
+        font-size: 12.5px;
         white-space: nowrap;
+        min-height: 38px;
+      }
+      .tabs-bar > button.btn {
+        flex-shrink: 0;
+        white-space: nowrap;
+        font-size: 12px;
+        padding: 8px 12px;
+        min-height: 38px;
       }
 
       /* Editor do Anúncio no Mobile */
       .ad-card {
-        padding: 12px;
+        padding: 14px 12px;
         border-radius: 12px;
         margin-bottom: 12px;
+        width: 100%;
+        box-sizing: border-box;
       }
       .ad-card-header {
         flex-direction: column;
         align-items: stretch;
         gap: 10px;
-        margin-bottom: 10px;
+        margin-bottom: 12px;
       }
       .ad-name-input {
         width: 100%;
-        font-size: 13.5px;
-        padding: 8px 10px;
+        box-sizing: border-box;
+        padding: 10px 12px;
       }
       .ad-toggle-label {
-        font-size: 12.5px;
+        font-size: 13px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .ad-toggle-label input {
+        width: 20px;
+        height: 20px;
       }
       textarea {
-        min-height: 130px;
-        font-size: 13px;
-        padding: 10px;
+        min-height: 140px;
+        padding: 12px;
+        box-sizing: border-box;
+        line-height: 1.4;
       }
 
       /* Configurações de Rotação e Delay */
       .mode-select-box {
         padding: 12px;
+        width: 100%;
+        box-sizing: border-box;
       }
       .mode-select-box select {
-        font-size: 12.5px;
-        padding: 8px 10px;
+        padding: 10px 12px;
         width: 100%;
+        box-sizing: border-box;
+        text-overflow: ellipsis;
       }
       .settings-row {
-        grid-template-columns: 1fr;
+        grid-template-columns: 1fr 1fr;
         gap: 10px;
         padding: 12px;
+        width: 100%;
+        box-sizing: border-box;
+      }
+      .settings-row input[type="number"] {
+        padding: 10px;
+        box-sizing: border-box;
       }
       .checkbox-row {
         flex-direction: column;
-        gap: 8px;
-        font-size: 12px;
+        gap: 10px;
+        font-size: 12.5px;
+        width: 100%;
       }
 
       /* Botões de Ação */
       .btn-primary {
-        padding: 12px 16px;
-        font-size: 14px;
+        padding: 14px 16px;
+        font-size: 15px;
+        min-height: 48px;
       }
       .btn-stop {
-        padding: 12px 16px;
-        font-size: 14px;
+        padding: 14px 16px;
+        font-size: 15px;
+        min-height: 48px;
       }
 
-      /* Toolbar e Lista de Grupos no Mobile */
+      /* Sub-abas e Toolbar de Grupos no Mobile */
+      .group-subtabs-bar {
+        display: flex;
+        gap: 6px;
+        margin-bottom: 12px;
+        background: var(--card-2);
+        padding: 4px;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        width: 100%;
+        box-sizing: border-box;
+      }
+      .group-subtabs-bar .nav-tab {
+        flex: 1;
+        padding: 9px 4px;
+        font-size: 12px;
+        font-weight: 700;
+        text-align: center;
+        justify-content: center;
+        min-height: 38px;
+        white-space: nowrap;
+      }
       .group-toolbar {
         flex-direction: column;
         gap: 8px;
+        width: 100%;
       }
       .group-search {
         width: 100%;
         min-width: 100%;
-        font-size: 13px;
+        box-sizing: border-box;
+        padding: 10px 12px;
       }
       .toolbar-btn-group {
         display: flex;
@@ -1675,51 +1785,103 @@ app.get(["/", "/qr"], async (req, res) => {
       .toolbar-btn-group .btn {
         flex: 1;
         text-align: center;
-        padding: 8px 6px;
+        padding: 9px 4px;
         font-size: 11.5px;
+        min-height: 38px;
+        white-space: nowrap;
       }
       .groups-list {
-        max-height: 320px;
+        max-height: 340px;
+        width: 100%;
+        box-sizing: border-box;
       }
       .group-item {
-        padding: 8px 10px;
+        padding: 10px 8px;
         gap: 8px;
+        min-height: 48px;
+        width: 100%;
+        box-sizing: border-box;
+      }
+      .group-left {
+        gap: 8px;
+      }
+      .group-left input[type="checkbox"] {
+        width: 22px;
+        height: 22px;
+        min-width: 22px;
+      }
+      .group-name {
+        font-size: 13.5px;
+      }
+      .group-right {
+        gap: 6px;
       }
       .group-meta {
         font-size: 11px;
       }
       .btn-hide-group, .btn-unhide-group {
-        font-size: 11px;
-        padding: 3px 6px;
+        font-size: 11.5px;
+        font-weight: 700;
+        padding: 6px 9px;
+        border-radius: 7px;
+        min-height: 34px;
       }
 
       /* Galeria no Mobile */
       .gallery-grid {
         grid-template-columns: 1fr;
         gap: 12px;
+        width: 100%;
       }
       .gallery-card {
-        padding: 12px;
+        padding: 14px 12px;
+        width: 100%;
+        box-sizing: border-box;
       }
       .gallery-thumb {
         height: 180px;
       }
+      .gallery-actions {
+        flex-wrap: wrap;
+        gap: 8px;
+      }
 
       /* Modal de Edição no Mobile */
       .modal-card {
-        padding: 16px 14px;
-        border-radius: 14px;
-        max-height: 94vh;
+        padding: 18px 14px;
+        border-radius: 16px;
+        max-height: 90vh;
+        max-height: 90dvh;
         width: 100%;
+        box-sizing: border-box;
       }
       .modal-title {
-        font-size: 15px;
+        font-size: 16px;
+      }
+      .modal-footer {
+        flex-direction: column !important;
+        align-items: stretch !important;
+        gap: 12px !important;
+      }
+      .modal-footer .modal-btn-row {
+        display: flex !important;
+        gap: 8px !important;
+        width: 100% !important;
+      }
+      .modal-footer .modal-btn-row .btn {
+        flex: 1 !important;
+        text-align: center !important;
+        padding: 12px 8px !important;
+        font-size: 13.5px !important;
+        min-height: 42px !important;
       }
 
       /* QR Screen no Mobile */
       .qr-screen {
         margin: 20px auto;
         padding: 20px 14px;
+        width: 100%;
+        box-sizing: border-box;
       }
       .qr-wrapper {
         min-width: unset;
@@ -1736,23 +1898,38 @@ app.get(["/", "/qr"], async (req, res) => {
       /* Progress Card no Mobile */
       .progress-card {
         padding: 12px;
+        width: 100%;
+        box-sizing: border-box;
       }
       .logs-box {
-        max-height: 150px;
+        max-height: 140px;
         font-size: 11px;
       }
     }
 
     @media (max-width: 440px) {
       .brand h1 {
-        font-size: 13.5px;
+        font-size: 13px;
       }
       .main-nav .nav-tab {
         font-size: 11px;
-        padding: 6px 4px;
+        padding: 8px 2px;
+      }
+      .group-subtabs-bar .nav-tab {
+        font-size: 11px;
+        padding: 8px 2px;
+      }
+      .settings-row {
+        grid-template-columns: 1fr;
       }
       .group-item {
-        padding: 8px 6px;
+        padding: 9px 6px;
+      }
+    }
+
+    @media (max-width: 380px) {
+      .group-meta {
+        display: none;
       }
     }
   </style>
@@ -1897,11 +2074,11 @@ app.get(["/", "/qr"], async (req, res) => {
         <p class="panel-sub">Marque os grupos que receberão as ofertas. Grupos pessoais ou sensíveis podem ser <strong>Ocultados</strong> para nunca receberem mensagens.</p>
 
         <!-- Sub-abas: Grupos Ativos vs Ocultos -->
-        <div style="display:flex;gap:6px;margin-bottom:12px;background:var(--card-2);padding:4px;border-radius:10px;border:1px solid var(--border);">
-          <button id="groupTabActive" class="nav-tab active" style="flex:1;padding:8px 10px;font-size:12.5px;font-weight:700;" onclick="setGroupFilter('active')">
+        <div class="group-subtabs-bar">
+          <button id="groupTabActive" class="nav-tab active" onclick="setGroupFilter('active')">
             📢 Grupos Ativos (<span id="activeGroupsCount">0</span>)
           </button>
-          <button id="groupTabHidden" class="nav-tab" style="flex:1;padding:8px 10px;font-size:12.5px;font-weight:700;" onclick="setGroupFilter('hidden')">
+          <button id="groupTabHidden" class="nav-tab" onclick="setGroupFilter('hidden')">
             🔒 Ocultos / Bloqueados (<span id="hiddenGroupsCount">0</span>)
           </button>
         </div>
@@ -2004,12 +2181,12 @@ app.get(["/", "/qr"], async (req, res) => {
         <textarea id="modalCaptionInput" placeholder="Cole ou digite a descrição do anúncio..." style="min-height:160px;margin-bottom:4px;"></textarea>
       </div>
 
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-top:16px;">
+      <div class="modal-footer" style="display:flex;align-items:center;justify-content:space-between;margin-top:16px;">
         <label class="select-tag">
           <input type="checkbox" id="modalAdEnabledCheck" checked />
           <span>✅ Incluir este anúncio no Disparo</span>
         </label>
-        <div style="display:flex;gap:8px;">
+        <div class="modal-btn-row" style="display:flex;gap:8px;">
           <button class="btn" onclick="closeEditModal()">Cancelar</button>
           <button class="btn" style="background:var(--green);color:#0b141a;font-weight:700;" onclick="saveAdFromModal()">💾 Salvar Anúncio</button>
         </div>
