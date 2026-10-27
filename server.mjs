@@ -235,6 +235,7 @@ function randomInt(min, max) {
 // Converte dataURL/base64 em Buffer de forma segura e validada
 function parseImageData(dataUrl) {
   if (!dataUrl || typeof dataUrl !== "string") return null;
+  if (dataUrl.startsWith("/") || dataUrl.startsWith("http")) return null;
   const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
   if (match) {
     try {
@@ -246,7 +247,7 @@ function parseImageData(dataUrl) {
   }
   try {
     const buf = Buffer.from(dataUrl, "base64");
-    return buf.length > 0 ? { mime: "image/jpeg", buffer: buf } : null;
+    return buf.length > 64 ? { mime: "image/jpeg", buffer: buf } : null;
   } catch (e) {
     return null;
   }
@@ -904,18 +905,65 @@ const app = express();
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
+// Helpers para evitar tráfego de megabytes de Base64 a cada segundo no navegador/celular
+function getClientAds() {
+  return (appAds || []).map((ad) => ({
+    ...ad,
+    imageBase64: ad.imageBase64
+      ? "/ad-image/" + encodeURIComponent(ad.id) + "?v=" + String(ad.imageBase64.length)
+      : null,
+  }));
+}
+
+function mergeIncomingAds(incomingAds) {
+  if (!Array.isArray(incomingAds)) return appAds;
+  const existingMap = new Map((appAds || []).map((a) => [a.id, a]));
+  return incomingAds.map((ad) => {
+    const prev = existingMap.get(ad.id);
+    let finalImg = ad.imageBase64 || null;
+    if (typeof finalImg === "string" && finalImg.startsWith("/ad-image/")) {
+      finalImg = prev ? prev.imageBase64 : null;
+    }
+    return {
+      ...ad,
+      imageBase64: finalImg,
+    };
+  });
+}
+
+// GET /ad-image/:id — serve a foto do anúncio diretamente em binário com cache HTTP
+app.get("/ad-image/:id", (req, res) => {
+  const ad = (appAds || []).find((a) => a && a.id === req.params.id);
+  if (!ad || !ad.imageBase64) return res.status(404).end();
+  const parsed = parseImageData(ad.imageBase64);
+  if (!parsed || !parsed.buffer) return res.status(404).end();
+  res.setHeader("Content-Type", parsed.mime || "image/jpeg");
+  res.setHeader("Cache-Control", "public, max-age=86400");
+  res.send(parsed.buffer);
+});
+
 // GET /status
 app.get("/status", (req, res) => {
-  res.json({
+  const includeInit = req.query.init === "1";
+  const payload = {
     status: waStatus,
     user: waUser,
     name: waName,
     hasQr: !!waQrCode,
     qrCodeDataUrl: waQrCode,
     campaign: campaignState,
-    config: appConfig,
-    ads: appAds,
-  });
+  };
+  if (includeInit) {
+    payload.config = {
+      minDelaySec: appConfig.minDelaySec,
+      maxDelaySec: appConfig.maxDelaySec,
+      shuffleGroups: appConfig.shuffleGroups,
+      simulateTyping: appConfig.simulateTyping,
+      rotationMode: appConfig.rotationMode,
+    };
+    payload.ads = getClientAds();
+  }
+  res.json(payload);
 });
 
 // GET /test-fetch-meta
@@ -1027,9 +1075,9 @@ app.post("/config", (req, res) => {
 app.post("/ads", (req, res) => {
   const { ads } = req.body;
   if (Array.isArray(ads)) {
-    appAds = ads;
+    appAds = mergeIncomingAds(ads);
     saveAds();
-    return res.json({ success: true, ads: appAds });
+    return res.json({ success: true, ads: getClientAds() });
   }
   res.status(400).json({ success: false, error: "ads deve ser um array" });
 });
@@ -1040,7 +1088,7 @@ app.post("/broadcast", async (req, res) => {
     const { ads, selectedGroups, hiddenGroups, minDelaySec, maxDelaySec, shuffleGroups, simulateTyping, rotationMode } = req.body;
 
     if (Array.isArray(ads)) {
-      appAds = ads;
+      appAds = mergeIncomingAds(ads);
       saveAds();
     }
     if (Array.isArray(hiddenGroups)) appConfig.hiddenGroups = hiddenGroups;
@@ -1113,9 +1161,7 @@ app.get(["/", "/qr"], async (req, res) => {
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
-  <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="format-detection" content="telephone=no" />
   <title>WhatsApp Cledson — Disparador Multi-Anúncios Anti-Ban</title>
   <style>
@@ -1140,20 +1186,13 @@ app.get(["/", "/qr"], async (req, res) => {
     html {
       -webkit-text-size-adjust: 100%;
       text-size-adjust: 100%;
-      width: 100%;
-      max-width: 100%;
-      overflow-x: hidden;
     }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       background: var(--bg);
       color: var(--text);
       min-height: 100vh;
-      min-height: 100dvh;
-      padding: env(safe-area-inset-top, 16px) env(safe-area-inset-right, 16px) env(safe-area-inset-bottom, 16px) env(safe-area-inset-left, 16px);
-      overflow-x: hidden;
-      width: 100%;
-      max-width: 100%;
+      padding: 20px;
       -webkit-font-smoothing: antialiased;
     }
     .container { max-width: 1200px; margin: 0 auto; width: 100%; }
@@ -1168,13 +1207,15 @@ app.get(["/", "/qr"], async (req, res) => {
       padding: 16px 22px;
       border-radius: 16px;
       margin-bottom: 20px;
+      width: 100%;
+      min-width: 0;
     }
-    .brand { display: flex; align-items: center; gap: 14px; }
+    .brand { display: flex; align-items: center; gap: 14px; min-width: 0; }
     .brand-icon {
       width: 44px; height: 44px; border-radius: 12px;
       background: rgba(37, 211, 102, 0.15); color: var(--green);
       display: flex; align-items: center; justify-content: center;
-      font-size: 22px; font-weight: bold;
+      font-size: 22px; font-weight: bold; flex-shrink: 0;
     }
     .brand h1 { font-size: 19px; font-weight: 700; color: #fff; }
     .brand p { font-size: 13px; color: var(--muted); margin-top: 2px; }
@@ -1204,22 +1245,33 @@ app.get(["/", "/qr"], async (req, res) => {
 
     .grid {
       display: grid;
-      grid-template-columns: 1.15fr 0.85fr;
+      grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
       gap: 20px;
+      width: 100%;
+      max-width: 100%;
     }
-    @media (max-width: 980px) { .grid { grid-template-columns: 1fr; } }
+    @media (max-width: 980px) {
+      .grid {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 16px;
+      }
+    }
 
     .panel {
       background: var(--card);
       border: 1px solid var(--border);
       border-radius: 16px;
       padding: 22px;
+      min-width: 0;
+      max-width: 100%;
+      width: 100%;
     }
     .panel-title {
       font-size: 16px; font-weight: 700; margin-bottom: 6px;
       display: flex; align-items: center; justify-content: space-between;
+      flex-wrap: wrap; gap: 8px; min-width: 0;
     }
-    .panel-sub { font-size: 13px; color: var(--muted); margin-bottom: 18px; }
+    .panel-sub { font-size: 13px; color: var(--muted); margin-bottom: 18px; line-height: 1.45; }
 
     /* Badges e Tabs */
     .radar-badge, .nav-badge {
@@ -1234,18 +1286,20 @@ app.get(["/", "/qr"], async (req, res) => {
     .nav-tab.active { background: #222e35; color: #fff; }
     .tabs-bar {
       display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; align-items: center;
+      min-width: 0; max-width: 100%; width: 100%;
     }
     .tab-btn {
       background: var(--card-2); color: var(--text); border: 1px solid var(--border);
       padding: 9px 14px; border-radius: 10px; font-size: 13px; font-weight: 600;
       cursor: pointer; transition: 0.15s; display: inline-flex; align-items: center; gap: 6px;
+      max-width: 100%; overflow: hidden; text-overflow: ellipsis;
     }
     .tab-btn:hover { background: #222e35; }
     .tab-btn.active {
       background: rgba(37, 211, 102, 0.15); color: var(--green); border-color: rgba(37, 211, 102, 0.4);
     }
     .tab-dot {
-      width: 8px; height: 8px; border-radius: 50%; background: #64748b;
+      width: 8px; height: 8px; border-radius: 50%; background: #64748b; flex-shrink: 0;
     }
     .tab-btn.active .tab-dot { background: var(--green); }
     .tab-btn.has-content .tab-dot { background: #38bdf8; }
@@ -1253,13 +1307,14 @@ app.get(["/", "/qr"], async (req, res) => {
 
     .ad-card {
       background: var(--card-2); border: 1px solid var(--border); border-radius: 14px; padding: 18px; margin-bottom: 16px;
+      min-width: 0; max-width: 100%; width: 100%;
     }
     .ad-card-header {
-      display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;
+      display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; gap: 10px; flex-wrap: wrap;
     }
     .ad-name-input {
       background: var(--card); border: 1px solid #2a3942; color: #fff;
-      padding: 6px 12px; border-radius: 8px; font-size: 14px; font-weight: 600; width: 60%;
+      padding: 6px 12px; border-radius: 8px; font-size: 14px; font-weight: 600; width: 60%; min-width: 0;
     }
     .ad-toggle-label {
       font-size: 13px; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; color: #d1d7db;
@@ -1270,11 +1325,15 @@ app.get(["/", "/qr"], async (req, res) => {
       border: 2px dashed #2a3942; background: var(--card);
       border-radius: 12px; padding: 16px; text-align: center; cursor: pointer;
       transition: 0.2s; margin-bottom: 14px;
+      min-width: 0; max-width: 100%; width: 100%; overflow: hidden;
     }
     .upload-zone:hover { border-color: var(--green); background: rgba(37, 211, 102, 0.04); }
     .upload-zone input[type="file"] { display: none; }
+    .preview-container {
+      width: 100%; max-width: 100%; overflow: hidden; text-align: center;
+    }
     .preview-container img {
-      max-height: 200px; max-width: 100%; border-radius: 8px; display: block; margin: 0 auto;
+      max-height: 200px; max-width: 100%; width: auto; height: auto; object-fit: contain; border-radius: 8px; display: block; margin: 0 auto;
     }
     .remove-img-btn {
       margin-top: 8px; background: rgba(239, 68, 68, 0.15); color: #f87171;
@@ -1283,7 +1342,7 @@ app.get(["/", "/qr"], async (req, res) => {
     }
 
     textarea {
-      width: 100%; min-height: 170px; background: var(--card); border: 1px solid #2a3942;
+      width: 100%; max-width: 100%; min-height: 170px; background: var(--card); border: 1px solid #2a3942;
       border-radius: 10px; padding: 12px; color: #fff; font-family: inherit; font-size: 13.5px;
       line-height: 1.45; resize: vertical; margin-bottom: 12px;
     }
@@ -1292,22 +1351,27 @@ app.get(["/", "/qr"], async (req, res) => {
     .mode-select-box {
       background: var(--card-2); border: 1px solid var(--border); border-radius: 12px;
       padding: 14px; margin-bottom: 16px; display: flex; flex-direction: column; gap: 8px;
+      min-width: 0; max-width: 100%; width: 100%;
     }
     .mode-select-box select {
       background: var(--card); border: 1px solid #2a3942; color: #fff;
       padding: 9px 12px; border-radius: 8px; font-size: 13.5px;
+      width: 100%; max-width: 100%; min-width: 0; text-overflow: ellipsis;
     }
 
     .settings-row {
-      display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+      display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px;
       background: var(--card-2); padding: 14px; border-radius: 12px; margin-bottom: 16px; border: 1px solid var(--border);
+      min-width: 0; max-width: 100%; width: 100%;
     }
+    .settings-row > div { min-width: 0; }
     .settings-row input[type="number"] {
       width: 100%; background: var(--card); border: 1px solid #2a3942; color: #fff;
       padding: 8px 10px; border-radius: 8px; font-size: 14px; margin-top: 4px;
     }
     .checkbox-row {
       display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; font-size: 13px; color: #d1d7db;
+      min-width: 0; max-width: 100%; width: 100%;
     }
     .checkbox-row label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
 
@@ -1328,40 +1392,66 @@ app.get(["/", "/qr"], async (req, res) => {
     }
 
     /* Coluna Direita (Grupos) */
-    .group-toolbar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
-    .toolbar-btn-group { display: flex; gap: 8px; flex-wrap: wrap; }
+    .group-subtabs-bar {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 12px;
+      background: var(--card-2);
+      padding: 4px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      width: 100%;
+      max-width: 100%;
+      min-width: 0;
+    }
+    .group-subtabs-bar .nav-tab {
+      flex: 1;
+      min-width: 0;
+      text-align: center;
+      justify-content: center;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .group-toolbar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; width: 100%; min-width: 0; }
+    .toolbar-btn-group { display: flex; gap: 8px; flex-wrap: wrap; min-width: 0; }
     .group-search {
-      flex: 1; min-width: 180px; background: var(--card-2); border: 1px solid #2a3942;
+      flex: 1; min-width: 0; background: var(--card-2); border: 1px solid #2a3942;
       color: #fff; padding: 9px 12px; border-radius: 10px; font-size: 13.5px;
     }
     .groups-list {
-      max-height: 380px; overflow-y: auto; border: 1px solid var(--border);
-      border-radius: 12px; background: var(--card-2);
+      max-height: 380px; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch;
+      border: 1px solid var(--border); border-radius: 12px; background: var(--card-2);
+      width: 100%; max-width: 100%; min-width: 0;
     }
     .group-item {
       display: flex; align-items: center; justify-content: space-between; gap: 10px;
       padding: 10px 14px; border-bottom: 1px solid var(--border); cursor: pointer; transition: 0.15s;
+      width: 100%; max-width: 100%; min-width: 0;
     }
     .group-item:last-child { border-bottom: none; }
     .group-item:hover { background: rgba(255,255,255,0.03); }
     .group-item.selected { background: rgba(37, 211, 102, 0.08); }
-    .group-left { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; overflow: hidden; }
+    .group-left { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1 1 0%; overflow: hidden; }
     .group-left input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--green); cursor: pointer; flex-shrink: 0; }
     .group-name {
-      font-size: 13.5px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1;
+      font-size: 13.5px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1 1 0%;
     }
     .group-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
     .group-meta { font-size: 12px; color: var(--muted); white-space: nowrap; }
     .btn-hide-group {
       background: rgba(239, 68, 68, 0.12); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.25);
       font-size: 11.5px; font-weight: 600; padding: 4px 8px; border-radius: 6px; cursor: pointer; transition: 0.15s;
-      display: inline-flex; align-items: center; gap: 4px;
+      display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;
     }
     .btn-hide-group:hover { background: #ef4444; color: #fff; border-color: #ef4444; }
     .btn-unhide-group {
       background: rgba(56, 189, 248, 0.12); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.25);
       font-size: 11.5px; font-weight: 600; padding: 4px 8px; border-radius: 6px; cursor: pointer; transition: 0.15s;
-      display: inline-flex; align-items: center; gap: 4px;
+      display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;
     }
     .btn-unhide-group:hover { background: #38bdf8; color: #0b141a; border-color: #38bdf8; }
 
@@ -1391,9 +1481,11 @@ app.get(["/", "/qr"], async (req, res) => {
     /* Estilos do Banco de Anúncios / Galeria */
     .gallery-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
       gap: 16px;
       margin-top: 16px;
+      width: 100%;
+      min-width: 0;
     }
     .gallery-card {
       background: var(--card-2);
@@ -1405,6 +1497,8 @@ app.get(["/", "/qr"], async (req, res) => {
       justify-content: space-between;
       transition: 0.2s;
       position: relative;
+      min-width: 0;
+      max-width: 100%;
     }
     .gallery-card:hover { border-color: rgba(37, 211, 102, 0.4); }
     .gallery-card.selected-for-campaign {
@@ -1439,6 +1533,7 @@ app.get(["/", "/qr"], async (req, res) => {
       font-weight: 700;
       color: #fff;
       margin-bottom: 6px;
+      word-break: break-word;
     }
     .gallery-card-caption {
       font-size: 12.5px;
@@ -1449,12 +1544,14 @@ app.get(["/", "/qr"], async (req, res) => {
       text-overflow: ellipsis;
       margin-bottom: 12px;
       white-space: pre-wrap;
+      word-break: break-word;
     }
     .gallery-actions {
       display: flex;
       gap: 8px;
       align-items: center;
       margin-top: auto;
+      flex-wrap: wrap;
     }
     .select-tag {
       display: inline-flex;
@@ -1474,14 +1571,16 @@ app.get(["/", "/qr"], async (req, res) => {
     .progress-card {
       margin-top: 18px; background: var(--card-2); border: 1px solid var(--border);
       border-radius: 12px; padding: 16px;
+      min-width: 0; max-width: 100%; width: 100%;
     }
     .progress-bar-bg {
       width: 100%; height: 10px; background: #0b141a; border-radius: 999px; overflow: hidden; margin: 10px 0;
     }
     .progress-bar-fill { height: 100%; background: var(--green); width: 0%; transition: width 0.4s ease; }
     .logs-box {
-      max-height: 200px; overflow-y: auto; background: #0b141a; border: 1px solid var(--border);
+      max-height: 200px; overflow-y: auto; overflow-x: hidden; background: #0b141a; border: 1px solid var(--border);
       border-radius: 10px; padding: 10px; font-family: monospace; font-size: 12px; margin-top: 12px;
+      word-break: break-word; overflow-wrap: anywhere;
     }
     .log-entry { padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
     .log-entry.SUCCESS { color: #4ade80; }
@@ -1489,106 +1588,74 @@ app.get(["/", "/qr"], async (req, res) => {
     .log-entry.WARN { color: #fbbf24; }
     .log-entry.INFO, .log-entry.DONE { color: #93c5fd; }
 
-    /* ─── Responsividade Mobile Completa (Otimizado para iPhone / iOS Safari e Android) ─── */
-    .header-right-actions { display: flex; align-items: center; gap: 10px; }
+    /* ─── Responsividade Mobile Limpa e Destravada (iPhone / Android) ─── */
+    .header-right-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
     .header-status-box { display: flex; align-items: center; gap: 10px; }
     .main-nav { display: flex; background: var(--card-2); border: 1px solid var(--border); border-radius: 12px; padding: 4px; }
 
-    @media (max-width: 980px) {
-      .grid { grid-template-columns: 1fr; gap: 16px; }
-    }
-
     @media (max-width: 768px) {
-      /* PREVENÇÃO DO ZOOM AUTOMÁTICO DO IPHONE/SAFARI:
-         No iOS, qualquer input/textarea/select com font-size < 16px força zoom involuntário da tela,
-         jogando cabeçalhos e botões para fora da visualização. Fixamos 16px para estabilidade nativa. */
+      /* Evita que o Safari no iPhone dê zoom automático ao tocar num campo de texto */
       input[type="text"],
       input[type="number"],
       input[type="search"],
       textarea,
       select {
         font-size: 16px !important;
-        -webkit-appearance: none;
-        border-radius: 10px;
-      }
-
-      button, .btn, .nav-tab, .tab-btn, .select-tag, .group-item, .btn-hide-group, .btn-unhide-group {
-        touch-action: manipulation;
-        -webkit-tap-highlight-color: transparent;
       }
 
       body {
-        padding: 10px 8px env(safe-area-inset-bottom, 12px) 8px;
+        padding: 10px;
         font-size: 13px;
-        overflow-x: hidden;
-        width: 100%;
-        max-width: 100vw;
-      }
-      .container {
-        width: 100%;
-        max-width: 100%;
-        overflow-x: hidden;
       }
 
-      /* Header no Mobile */
       header {
         flex-direction: column;
         align-items: stretch;
-        gap: 12px;
+        gap: 10px;
         padding: 12px 14px;
         margin-bottom: 14px;
         border-radius: 14px;
-        width: 100%;
-        box-sizing: border-box;
       }
       .brand {
-        display: flex;
-        align-items: center;
         gap: 10px;
-        width: 100%;
       }
       .brand-icon {
         width: 38px;
         height: 38px;
         font-size: 18px;
         border-radius: 10px;
-        flex-shrink: 0;
       }
       .brand h1 {
         font-size: 14.5px;
         line-height: 1.25;
-        word-break: break-word;
       }
       .brand p {
         font-size: 11.5px;
       }
       .header-right-actions {
         width: 100%;
-        display: flex;
         flex-direction: column;
+        align-items: stretch;
         gap: 8px;
       }
       .main-nav {
         width: 100%;
-        display: flex;
         gap: 4px;
       }
       .main-nav .nav-tab {
         flex: 1;
+        min-width: 0;
         text-align: center;
         justify-content: center;
-        padding: 10px 6px;
+        padding: 9px 6px;
         font-size: 12px;
-        min-height: 40px;
         display: flex;
         align-items: center;
         white-space: nowrap;
       }
       .header-status-box {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
         width: 100%;
+        justify-content: space-between;
         gap: 8px;
       }
       .status-pill {
@@ -1600,79 +1667,50 @@ app.get(["/", "/qr"], async (req, res) => {
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
-        min-height: 36px;
       }
       .header-status-box .btn {
         padding: 8px 12px;
         font-size: 11.5px;
         white-space: nowrap;
         flex-shrink: 0;
-        min-height: 36px;
       }
 
-      /* Painéis no Mobile */
       .panel {
         padding: 14px 12px;
         border-radius: 14px;
-        width: 100%;
-        box-sizing: border-box;
       }
       .panel-title {
         flex-direction: column;
         align-items: stretch;
         gap: 8px;
-        font-size: 14px;
+        font-size: 14.5px;
       }
       .panel-title .btn, .panel-title a {
-        align-self: stretch;
         text-align: center;
       }
       .panel-sub {
         font-size: 12px;
         margin-bottom: 12px;
-        line-height: 1.4;
       }
 
-      /* Abas dos Anúncios com Scroll Horizontal suave */
       .tabs-bar {
-        display: flex;
         gap: 6px;
-        flex-wrap: nowrap;
-        overflow-x: auto;
-        -webkit-overflow-scrolling: touch;
-        padding-bottom: 8px;
+        flex-wrap: wrap;
         margin-bottom: 12px;
-        width: 100%;
-      }
-      .tabs-bar::-webkit-scrollbar {
-        height: 4px;
-      }
-      .tabs-bar::-webkit-scrollbar-thumb {
-        background: #2a3942;
-        border-radius: 4px;
       }
       .tab-btn {
-        flex-shrink: 0;
-        padding: 8px 12px;
-        font-size: 12.5px;
-        white-space: nowrap;
-        min-height: 38px;
+        padding: 8px 11px;
+        font-size: 12px;
       }
       .tabs-bar > button.btn {
-        flex-shrink: 0;
-        white-space: nowrap;
         font-size: 12px;
-        padding: 8px 12px;
-        min-height: 38px;
+        padding: 8px 11px;
       }
 
-      /* Editor do Anúncio no Mobile */
       .ad-card {
-        padding: 14px 12px;
+        padding: 12px;
         border-radius: 12px;
         margin-bottom: 12px;
-        width: 100%;
-        box-sizing: border-box;
       }
       .ad-card-header {
         flex-direction: column;
@@ -1682,136 +1720,70 @@ app.get(["/", "/qr"], async (req, res) => {
       }
       .ad-name-input {
         width: 100%;
-        box-sizing: border-box;
-        padding: 10px 12px;
-      }
-      .ad-toggle-label {
-        font-size: 13px;
-        display: flex;
-        align-items: center;
-        gap: 8px;
-      }
-      .ad-toggle-label input {
-        width: 20px;
-        height: 20px;
+        padding: 9px 12px;
       }
       textarea {
-        min-height: 140px;
-        padding: 12px;
-        box-sizing: border-box;
-        line-height: 1.4;
+        min-height: 130px;
+        padding: 10px 12px;
       }
 
-      /* Configurações de Rotação e Delay */
       .mode-select-box {
         padding: 12px;
-        width: 100%;
-        box-sizing: border-box;
       }
       .mode-select-box select {
-        padding: 10px 12px;
-        width: 100%;
-        box-sizing: border-box;
-        text-overflow: ellipsis;
+        padding: 9px 10px;
       }
       .settings-row {
-        grid-template-columns: 1fr 1fr;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
         gap: 10px;
         padding: 12px;
-        width: 100%;
-        box-sizing: border-box;
-      }
-      .settings-row input[type="number"] {
-        padding: 10px;
-        box-sizing: border-box;
       }
       .checkbox-row {
         flex-direction: column;
-        gap: 10px;
+        gap: 8px;
         font-size: 12.5px;
-        width: 100%;
       }
 
-      /* Botões de Ação */
-      .btn-primary {
-        padding: 14px 16px;
-        font-size: 15px;
-        min-height: 48px;
-      }
-      .btn-stop {
-        padding: 14px 16px;
-        font-size: 15px;
-        min-height: 48px;
-      }
-
-      /* Sub-abas e Toolbar de Grupos no Mobile */
-      .group-subtabs-bar {
-        display: flex;
-        gap: 6px;
-        margin-bottom: 12px;
-        background: var(--card-2);
-        padding: 4px;
-        border-radius: 10px;
-        border: 1px solid var(--border);
-        width: 100%;
-        box-sizing: border-box;
-      }
       .group-subtabs-bar .nav-tab {
-        flex: 1;
-        padding: 9px 4px;
-        font-size: 12px;
-        font-weight: 700;
-        text-align: center;
-        justify-content: center;
-        min-height: 38px;
-        white-space: nowrap;
+        padding: 8px 4px;
+        font-size: 11.5px;
       }
       .group-toolbar {
         flex-direction: column;
+        align-items: stretch;
         gap: 8px;
-        width: 100%;
       }
       .group-search {
         width: 100%;
-        min-width: 100%;
-        box-sizing: border-box;
-        padding: 10px 12px;
+        padding: 9px 12px;
       }
       .toolbar-btn-group {
-        display: flex;
-        gap: 8px;
         width: 100%;
+        gap: 8px;
       }
       .toolbar-btn-group .btn {
         flex: 1;
+        min-width: 0;
         text-align: center;
-        padding: 9px 4px;
-        font-size: 11.5px;
-        min-height: 38px;
-        white-space: nowrap;
+        padding: 9px 6px;
+        font-size: 12px;
       }
       .groups-list {
         max-height: 340px;
-        width: 100%;
-        box-sizing: border-box;
       }
       .group-item {
-        padding: 10px 8px;
+        padding: 9px 8px;
         gap: 8px;
-        min-height: 48px;
-        width: 100%;
-        box-sizing: border-box;
       }
       .group-left {
         gap: 8px;
       }
       .group-left input[type="checkbox"] {
-        width: 22px;
-        height: 22px;
-        min-width: 22px;
+        width: 19px;
+        height: 19px;
       }
       .group-name {
-        font-size: 13.5px;
+        font-size: 13px;
       }
       .group-right {
         gap: 6px;
@@ -1820,43 +1792,21 @@ app.get(["/", "/qr"], async (req, res) => {
         font-size: 11px;
       }
       .btn-hide-group, .btn-unhide-group {
-        font-size: 11.5px;
-        font-weight: 700;
-        padding: 6px 9px;
-        border-radius: 7px;
-        min-height: 34px;
+        font-size: 11px;
+        padding: 5px 8px;
       }
 
-      /* Galeria no Mobile */
       .gallery-grid {
-        grid-template-columns: 1fr;
+        grid-template-columns: minmax(0, 1fr);
         gap: 12px;
-        width: 100%;
       }
       .gallery-card {
         padding: 14px 12px;
-        width: 100%;
-        box-sizing: border-box;
-      }
-      .gallery-thumb {
-        height: 180px;
-      }
-      .gallery-actions {
-        flex-wrap: wrap;
-        gap: 8px;
       }
 
-      /* Modal de Edição no Mobile */
       .modal-card {
         padding: 18px 14px;
         border-radius: 16px;
-        max-height: 90vh;
-        max-height: 90dvh;
-        width: 100%;
-        box-sizing: border-box;
-      }
-      .modal-title {
-        font-size: 16px;
       }
       .modal-footer {
         flex-direction: column !important;
@@ -1871,17 +1821,11 @@ app.get(["/", "/qr"], async (req, res) => {
       .modal-footer .modal-btn-row .btn {
         flex: 1 !important;
         text-align: center !important;
-        padding: 12px 8px !important;
-        font-size: 13.5px !important;
-        min-height: 42px !important;
       }
 
-      /* QR Screen no Mobile */
       .qr-screen {
         margin: 20px auto;
         padding: 20px 14px;
-        width: 100%;
-        box-sizing: border-box;
       }
       .qr-wrapper {
         min-width: unset;
@@ -1895,11 +1839,8 @@ app.get(["/", "/qr"], async (req, res) => {
         height: auto;
       }
 
-      /* Progress Card no Mobile */
       .progress-card {
         padding: 12px;
-        width: 100%;
-        box-sizing: border-box;
       }
       .logs-box {
         max-height: 140px;
@@ -1907,27 +1848,7 @@ app.get(["/", "/qr"], async (req, res) => {
       }
     }
 
-    @media (max-width: 440px) {
-      .brand h1 {
-        font-size: 13px;
-      }
-      .main-nav .nav-tab {
-        font-size: 11px;
-        padding: 8px 2px;
-      }
-      .group-subtabs-bar .nav-tab {
-        font-size: 11px;
-        padding: 8px 2px;
-      }
-      .settings-row {
-        grid-template-columns: 1fr;
-      }
-      .group-item {
-        padding: 9px 6px;
-      }
-    }
-
-    @media (max-width: 380px) {
+    @media (max-width: 390px) {
       .group-meta {
         display: none;
       }
@@ -1980,9 +1901,9 @@ app.get(["/", "/qr"], async (req, res) => {
         <div class="ad-card" id="adEditorCard">
           <div id="adEditorContent">
             <div class="ad-card-header">
-              <input type="text" id="adNameInput" class="ad-name-input" placeholder="Nome do Anúncio" oninput="onAdFieldChange()" />
+              <input type="text" id="adNameInput" class="ad-name-input" placeholder="Nome do Anúncio" oninput="onAdFieldChange(false)" />
               <label class="ad-toggle-label">
-                <input type="checkbox" id="adEnabledCheck" onchange="onAdFieldChange()" checked />
+                <input type="checkbox" id="adEnabledCheck" onchange="onAdFieldChange(true)" checked />
                 Incluir no Disparo
               </label>
             </div>
@@ -2005,7 +1926,7 @@ app.get(["/", "/qr"], async (req, res) => {
             <label style="font-size:12px;font-weight:600;color:#d1d7db;display:block;margin-bottom:6px;">
               📝 Descrição / Legenda
             </label>
-            <textarea id="captionInput" placeholder="Digite o texto deste anúncio..." oninput="onAdFieldChange()"></textarea>
+            <textarea id="captionInput" placeholder="Digite o texto deste anúncio..." oninput="onAdFieldChange(false)"></textarea>
           </div>
           <div id="adEditorEmpty" style="display:none;padding:32px 16px;text-align:center;">
             <div style="font-size:32px;margin-bottom:8px;">🖼️</div>
@@ -2019,7 +1940,7 @@ app.get(["/", "/qr"], async (req, res) => {
         <div class="mode-select-box">
           <label style="font-size:12.5px;font-weight:600;color:#fff;">🎯 Como mesclar os anúncios entre os grupos?</label>
           <select id="rotationModeSelect" onchange="saveAllSettings()">
-            <option value="round_robin">Alternar em Ordem: Anúncio 1 ➔ Anúncio 2 ➔ Anúncio 3 ➔ Repete (Recomendado)</option>
+            <option value="round_robin">Alternar em Ordem: Anúncio 1 ➔ 2 ➔ 3 (Recomendado)</option>
             <option value="random">Sorteio Aleatório a cada grupo</option>
           </select>
           <span style="font-size:11.5px;color:var(--muted);">
@@ -2357,7 +2278,7 @@ app.get(["/", "/qr"], async (req, res) => {
       if (modalImageData) {
         previewImg.src = modalImageData;
         placeholder.style.display = 'none';
-        preview.style.display = 'inline-block';
+        preview.style.display = 'block';
       } else {
         previewImg.src = '';
         placeholder.style.display = 'block';
@@ -2381,7 +2302,7 @@ app.get(["/", "/qr"], async (req, res) => {
         modalImageData = ev.target.result;
         document.getElementById('modalPreviewImg').src = modalImageData;
         document.getElementById('modalUploadPlaceholder').style.display = 'none';
-        document.getElementById('modalUploadPreview').style.display = 'inline-block';
+        document.getElementById('modalUploadPreview').style.display = 'block';
       };
       reader.readAsDataURL(file);
     }
@@ -2442,7 +2363,7 @@ app.get(["/", "/qr"], async (req, res) => {
     let groupsLoadedOnce = false;
 
     // Gerenciamento de Anúncios e Abas (Mostra apenas os selecionados para disparo)
-    function renderTabs() {
+    function renderTabs(reloadEditor = true) {
       const bar = document.getElementById('tabsBar');
       const contentDiv = document.getElementById('adEditorContent');
       const emptyDiv = document.getElementById('adEditorEmpty');
@@ -2460,9 +2381,13 @@ app.get(["/", "/qr"], async (req, res) => {
 
       // Se o anúncio atual não estiver mais entre os ativos, aponta para o primeiro ativo
       const curAd = adsList[currentAdIndex];
+      let needsIndexReset = false;
       if (!curAd || !curAd.enabled) {
         const firstActiveIdx = adsList.findIndex(a => a.enabled);
-        if (firstActiveIdx !== -1) currentAdIndex = firstActiveIdx;
+        if (firstActiveIdx !== -1) {
+          currentAdIndex = firstActiveIdx;
+          needsIndexReset = true;
+        }
       }
 
       bar.innerHTML = activeAds.map(ad => {
@@ -2479,12 +2404,14 @@ app.get(["/", "/qr"], async (req, res) => {
         <button class="btn" onclick="switchMainView('galeria')" title="Gerenciar todos os anúncios no banco">🖼️ Gerenciar no Banco</button>
       \`;
 
-      loadCurrentAdIntoEditor();
+      if (reloadEditor || needsIndexReset) {
+        loadCurrentAdIntoEditor();
+      }
     }
 
     function switchTab(index) {
       currentAdIndex = index;
-      renderTabs();
+      renderTabs(true);
     }
 
     function loadCurrentAdIntoEditor() {
@@ -2504,7 +2431,7 @@ app.get(["/", "/qr"], async (req, res) => {
       if (ad.imageBase64) {
         if (previewImg) previewImg.src = ad.imageBase64;
         if (placeholder) placeholder.style.display = 'none';
-        if (preview) preview.style.display = 'inline-block';
+        if (preview) preview.style.display = 'block';
       } else {
         if (previewImg) previewImg.src = '';
         if (placeholder) placeholder.style.display = 'block';
@@ -2512,7 +2439,7 @@ app.get(["/", "/qr"], async (req, res) => {
       }
     }
 
-    function onAdFieldChange() {
+    function onAdFieldChange(reloadEditor = false) {
       const ad = adsList[currentAdIndex];
       if (!ad) return;
       const nameEl = document.getElementById('adNameInput');
@@ -2521,7 +2448,7 @@ app.get(["/", "/qr"], async (req, res) => {
       if (nameEl) ad.name = nameEl.value;
       if (checkEl) ad.enabled = checkEl.checked;
       if (capEl) ad.caption = capEl.value;
-      renderTabs();
+      renderTabs(reloadEditor);
       debounceSaveAds();
     }
 
@@ -2636,6 +2563,13 @@ app.get(["/", "/qr"], async (req, res) => {
         if (Array.isArray(data.selectedGroups) && !groupsLoadedOnce) {
           selectedSet = new Set(data.selectedGroups.filter(id => !hiddenSet.has(id)));
         }
+        // Limpa seleções de grupos que já não existem ou estão ocultos
+        const validGroupIds = new Set(allGroups.map(g => g.id));
+        for (const sid of Array.from(selectedSet)) {
+          if (!validGroupIds.has(sid) || hiddenSet.has(sid)) {
+            selectedSet.delete(sid);
+          }
+        }
         groupsLoadedOnce = true;
         renderGroups();
       } catch (e) {
@@ -2654,6 +2588,7 @@ app.get(["/", "/qr"], async (req, res) => {
 
       const activeGroups = allGroups.filter(g => !hiddenSet.has(g.id));
       const hiddenGroups = allGroups.filter(g => hiddenSet.has(g.id));
+      const activeSelectedCount = activeGroups.filter(g => selectedSet.has(g.id)).length;
 
       const activeCountEl = document.getElementById('activeGroupsCount');
       const hiddenCountEl = document.getElementById('hiddenGroupsCount');
@@ -2663,9 +2598,9 @@ app.get(["/", "/qr"], async (req, res) => {
 
       if (activeCountEl) activeCountEl.innerText = activeGroups.length;
       if (hiddenCountEl) hiddenCountEl.innerText = hiddenGroups.length;
-      if (selectedCounterEl) selectedCounterEl.innerText = selectedSet.size;
+      if (selectedCounterEl) selectedCounterEl.innerText = activeSelectedCount;
       if (totalActiveCounterEl) totalActiveCounterEl.innerText = activeGroups.length;
-      if (btnGroupCountEl) btnGroupCountEl.innerText = selectedSet.size;
+      if (btnGroupCountEl) btnGroupCountEl.innerText = activeSelectedCount;
 
       if (currentGroupFilter === 'active') {
         const filtered = activeGroups.filter(g => (g.subject || '').toLowerCase().includes(query));
@@ -2875,9 +2810,15 @@ app.get(["/", "/qr"], async (req, res) => {
       setTimeout(pollStatus, 1200);
     }
 
+    let initialDataLoaded = false;
+    let isPollingStatus = false;
+
     async function pollStatus() {
+      if (isPollingStatus) return;
+      isPollingStatus = true;
       try {
-        const res = await fetch('/status?t=' + Date.now());
+        const url = '/status?t=' + Date.now() + (!initialDataLoaded ? '&init=1' : '');
+        const res = await fetch(url);
         const data = await res.json();
 
         const pill = document.getElementById('statusPill');
@@ -2902,14 +2843,28 @@ app.get(["/", "/qr"], async (req, res) => {
             if (galeriaSec) galeriaSec.style.display = 'block';
           }
 
-          if (adsList.length === 0 && Array.isArray(data.ads)) {
+          if (!initialDataLoaded && Array.isArray(data.ads)) {
             adsList = data.ads;
-            renderTabs();
-            loadCurrentAdIntoEditor();
+            initialDataLoaded = true;
+            renderTabs(true);
             updateGalleryBadge();
           }
-          if (data.config?.rotationMode) {
-            document.getElementById('rotationModeSelect').value = data.config.rotationMode;
+          if (data.config) {
+            if (data.config.rotationMode) {
+              document.getElementById('rotationModeSelect').value = data.config.rotationMode;
+            }
+            if (typeof data.config.minDelaySec === 'number') {
+              document.getElementById('minDelayInput').value = data.config.minDelaySec;
+            }
+            if (typeof data.config.maxDelaySec === 'number') {
+              document.getElementById('maxDelayInput').value = data.config.maxDelaySec;
+            }
+            if (typeof data.config.simulateTyping === 'boolean') {
+              document.getElementById('typingCheck').checked = data.config.simulateTyping;
+            }
+            if (typeof data.config.shuffleGroups === 'boolean') {
+              document.getElementById('shuffleCheck').checked = data.config.shuffleGroups;
+            }
           }
           if (!groupsLoadedOnce) loadGroups(false);
         } else {
@@ -2966,6 +2921,8 @@ app.get(["/", "/qr"], async (req, res) => {
         }
       } catch (e) {
         console.error('Erro no pollStatus:', e);
+      } finally {
+        isPollingStatus = false;
       }
     }
 
