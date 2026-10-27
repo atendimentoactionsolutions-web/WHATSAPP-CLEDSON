@@ -1064,7 +1064,7 @@ app.get(["/", "/qr"], async (req, res) => {
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>WhatsApp Cledson — Disparador Multi-Anúncios Anti-Ban</title>
   <style>
     :root {
@@ -1260,6 +1260,7 @@ app.get(["/", "/qr"], async (req, res) => {
 
     /* Coluna Direita (Grupos) */
     .group-toolbar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+    .toolbar-btn-group { display: flex; gap: 8px; flex-wrap: wrap; }
     .group-search {
       flex: 1; min-width: 180px; background: var(--card-2); border: 1px solid #2a3942;
       color: #fff; padding: 9px 12px; border-radius: 10px; font-size: 13.5px;
@@ -1275,10 +1276,10 @@ app.get(["/", "/qr"], async (req, res) => {
     .group-item:last-child { border-bottom: none; }
     .group-item:hover { background: rgba(255,255,255,0.03); }
     .group-item.selected { background: rgba(37, 211, 102, 0.08); }
-    .group-left { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; }
+    .group-left { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; overflow: hidden; }
     .group-left input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--green); cursor: pointer; flex-shrink: 0; }
     .group-name {
-      font-size: 13.5px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 230px;
+      font-size: 13.5px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 1;
     }
     .group-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
     .group-meta { font-size: 12px; color: var(--muted); white-space: nowrap; }
@@ -1418,6 +1419,293 @@ app.get(["/", "/qr"], async (req, res) => {
     .log-entry.ERROR { color: #f87171; }
     .log-entry.WARN { color: #fbbf24; }
     .log-entry.INFO, .log-entry.DONE { color: #93c5fd; }
+
+    /* ─── Responsividade Mobile Completa ─── */
+    .header-right-actions { display: flex; align-items: center; gap: 10px; }
+    .header-status-box { display: flex; align-items: center; gap: 10px; }
+    .main-nav { display: flex; background: var(--card-2); border: 1px solid var(--border); border-radius: 12px; padding: 4px; }
+
+    @media (max-width: 980px) {
+      .grid { grid-template-columns: 1fr; gap: 16px; }
+    }
+
+    @media (max-width: 768px) {
+      body {
+        padding: 8px;
+        font-size: 13px;
+        overflow-x: hidden;
+      }
+      .container {
+        width: 100%;
+        overflow-x: hidden;
+      }
+
+      /* Header no Mobile */
+      header {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 12px;
+        padding: 12px 14px;
+        margin-bottom: 14px;
+        border-radius: 14px;
+      }
+      .brand {
+        gap: 10px;
+      }
+      .brand-icon {
+        width: 38px;
+        height: 38px;
+        font-size: 18px;
+        border-radius: 10px;
+        flex-shrink: 0;
+      }
+      .brand h1 {
+        font-size: 15px;
+        line-height: 1.25;
+      }
+      .brand p {
+        font-size: 11.5px;
+      }
+      .header-right-actions {
+        width: 100%;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .main-nav {
+        width: 100%;
+        display: flex;
+      }
+      .main-nav .nav-tab {
+        flex: 1;
+        text-align: center;
+        justify-content: center;
+        padding: 8px 6px;
+        font-size: 12px;
+        display: flex;
+        align-items: center;
+      }
+      .header-status-box {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        width: 100%;
+        gap: 8px;
+      }
+      .status-pill {
+        padding: 6px 12px;
+        font-size: 11.5px;
+        flex: 1;
+        justify-content: center;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .header-status-box .btn {
+        padding: 6px 12px;
+        font-size: 11.5px;
+        white-space: nowrap;
+      }
+
+      /* Painéis no Mobile */
+      .panel {
+        padding: 14px 12px;
+        border-radius: 14px;
+      }
+      .panel-title {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 8px;
+        font-size: 14px;
+      }
+      .panel-title .btn, .panel-title a {
+        align-self: stretch;
+        text-align: center;
+      }
+      .panel-sub {
+        font-size: 12px;
+        margin-bottom: 12px;
+        line-height: 1.4;
+      }
+
+      /* Abas dos Anúncios com Scroll Horizontal suave */
+      .tabs-bar {
+        display: flex;
+        gap: 6px;
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        padding-bottom: 6px;
+        margin-bottom: 12px;
+      }
+      .tabs-bar::-webkit-scrollbar {
+        height: 4px;
+      }
+      .tabs-bar::-webkit-scrollbar-thumb {
+        background: #2a3942;
+        border-radius: 4px;
+      }
+      .tab-btn {
+        flex-shrink: 0;
+        padding: 7px 11px;
+        font-size: 12px;
+        white-space: nowrap;
+      }
+
+      /* Editor do Anúncio no Mobile */
+      .ad-card {
+        padding: 12px;
+        border-radius: 12px;
+        margin-bottom: 12px;
+      }
+      .ad-card-header {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 10px;
+        margin-bottom: 10px;
+      }
+      .ad-name-input {
+        width: 100%;
+        font-size: 13.5px;
+        padding: 8px 10px;
+      }
+      .ad-toggle-label {
+        font-size: 12.5px;
+      }
+      textarea {
+        min-height: 130px;
+        font-size: 13px;
+        padding: 10px;
+      }
+
+      /* Configurações de Rotação e Delay */
+      .mode-select-box {
+        padding: 12px;
+      }
+      .mode-select-box select {
+        font-size: 12.5px;
+        padding: 8px 10px;
+        width: 100%;
+      }
+      .settings-row {
+        grid-template-columns: 1fr;
+        gap: 10px;
+        padding: 12px;
+      }
+      .checkbox-row {
+        flex-direction: column;
+        gap: 8px;
+        font-size: 12px;
+      }
+
+      /* Botões de Ação */
+      .btn-primary {
+        padding: 12px 16px;
+        font-size: 14px;
+      }
+      .btn-stop {
+        padding: 12px 16px;
+        font-size: 14px;
+      }
+
+      /* Toolbar e Lista de Grupos no Mobile */
+      .group-toolbar {
+        flex-direction: column;
+        gap: 8px;
+      }
+      .group-search {
+        width: 100%;
+        min-width: 100%;
+        font-size: 13px;
+      }
+      .toolbar-btn-group {
+        display: flex;
+        gap: 8px;
+        width: 100%;
+      }
+      .toolbar-btn-group .btn {
+        flex: 1;
+        text-align: center;
+        padding: 8px 6px;
+        font-size: 11.5px;
+      }
+      .groups-list {
+        max-height: 320px;
+      }
+      .group-item {
+        padding: 8px 10px;
+        gap: 8px;
+      }
+      .group-meta {
+        font-size: 11px;
+      }
+      .btn-hide-group, .btn-unhide-group {
+        font-size: 11px;
+        padding: 3px 6px;
+      }
+
+      /* Galeria no Mobile */
+      .gallery-grid {
+        grid-template-columns: 1fr;
+        gap: 12px;
+      }
+      .gallery-card {
+        padding: 12px;
+      }
+      .gallery-thumb {
+        height: 180px;
+      }
+
+      /* Modal de Edição no Mobile */
+      .modal-card {
+        padding: 16px 14px;
+        border-radius: 14px;
+        max-height: 94vh;
+        width: 100%;
+      }
+      .modal-title {
+        font-size: 15px;
+      }
+
+      /* QR Screen no Mobile */
+      .qr-screen {
+        margin: 20px auto;
+        padding: 20px 14px;
+      }
+      .qr-wrapper {
+        min-width: unset;
+        min-height: unset;
+        width: 100%;
+        max-width: 260px;
+        padding: 10px;
+      }
+      .qr-wrapper img {
+        width: 100%;
+        height: auto;
+      }
+
+      /* Progress Card no Mobile */
+      .progress-card {
+        padding: 12px;
+      }
+      .logs-box {
+        max-height: 150px;
+        font-size: 11px;
+      }
+    }
+
+    @media (max-width: 440px) {
+      .brand h1 {
+        font-size: 13.5px;
+      }
+      .main-nav .nav-tab {
+        font-size: 11px;
+        padding: 6px 4px;
+      }
+      .group-item {
+        padding: 8px 6px;
+      }
+    }
   </style>
 </head>
 <body>
@@ -1430,15 +1718,17 @@ app.get(["/", "/qr"], async (req, res) => {
           <p id="accountSubtitle">Sincronizando com a VPS...</p>
         </div>
       </div>
-      <div style="display:flex;align-items:center;gap:10px;">
-        <div id="mainNav" style="display:flex;background:var(--card-2);border:1px solid var(--border);border-radius:12px;padding:4px;">
+      <div class="header-right-actions">
+        <div id="mainNav" class="main-nav">
           <button class="nav-tab active" id="tabNavDisparo" onclick="switchMainView('disparo')">📢 Disparador</button>
           <button class="nav-tab" id="tabNavGaleria" onclick="switchMainView('galeria')">
             🖼️ Banco de Anúncios <span id="galleryBadge" class="radar-badge" style="background:#38bdf8;color:#0b141a;">0</span>
           </button>
         </div>
-        <div id="statusPill" class="status-pill wait">⏳ Conectando...</div>
-        <button class="btn" onclick="resetSession()">Trocar Número</button>
+        <div class="header-status-box">
+          <div id="statusPill" class="status-pill wait">⏳ Conectando...</div>
+          <button class="btn" onclick="resetSession()">Trocar Número</button>
+        </div>
       </div>
     </header>
 
@@ -1570,14 +1860,18 @@ app.get(["/", "/qr"], async (req, res) => {
         <!-- Toolbar para Grupos Ativos -->
         <div class="group-toolbar" id="activeGroupsToolbar">
           <input type="text" id="groupSearch" class="group-search" placeholder="🔍 Buscar grupo ativo pelo nome..." oninput="renderGroups()" />
-          <button class="btn" style="background:var(--green);color:#0b141a;font-weight:700;" onclick="selectAllGroups(true)">✓ Selecionar Todos</button>
-          <button class="btn" onclick="selectAllGroups(false)">Desmarcar Todos</button>
+          <div class="toolbar-btn-group">
+            <button class="btn" style="background:var(--green);color:#0b141a;font-weight:700;" onclick="selectAllGroups(true)">✓ Selecionar Todos</button>
+            <button class="btn" onclick="selectAllGroups(false)">Desmarcar Todos</button>
+          </div>
         </div>
 
         <!-- Toolbar para Grupos Ocultos -->
         <div class="group-toolbar" id="hiddenGroupsToolbar" style="display:none;">
           <input type="text" id="hiddenGroupSearch" class="group-search" placeholder="🔍 Buscar nos grupos ocultos..." oninput="renderGroups()" />
-          <button class="btn" style="background:#38bdf8;color:#0b141a;font-weight:700;" onclick="unhideAllGroups()">👁️ Reexibir Todos</button>
+          <div class="toolbar-btn-group">
+            <button class="btn" style="background:#38bdf8;color:#0b141a;font-weight:700;" onclick="unhideAllGroups()">👁️ Reexibir Todos</button>
+          </div>
         </div>
 
         <div class="groups-list" id="groupsList">
