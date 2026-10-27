@@ -107,20 +107,28 @@ function loadAds() {
 let appConfig = loadConfig();
 let appAds = loadAds();
 
-function saveConfig() {
+function safeWriteJson(filePath, data) {
   try {
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify(appConfig, null, 2));
+    const tempPath = `${filePath}.tmp.${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const jsonStr = JSON.stringify(data, null, 2);
+    fs.writeFileSync(tempPath, jsonStr, "utf-8");
+    fs.renameSync(tempPath, filePath);
   } catch (e) {
-    console.error("Erro ao salvar config.json:", e);
+    console.error(`Erro ao salvar ${filePath} de forma atômica:`, e);
+    try {
+      fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
+    } catch (fallbackErr) {
+      console.error(`Falha no fallback de escrita de ${filePath}:`, fallbackErr);
+    }
   }
 }
 
+function saveConfig() {
+  safeWriteJson(CONFIG_FILE, appConfig);
+}
+
 function saveAds() {
-  try {
-    fs.writeFileSync(ADS_FILE, JSON.stringify(appAds, null, 2));
-  } catch (e) {
-    console.error("Erro ao salvar ads.json:", e);
-  }
+  safeWriteJson(ADS_FILE, appAds);
 }
 
 // ─── Cache em Memória de Mensagens ───
@@ -164,6 +172,7 @@ let waQrRaw = null;
 let waUser = null;
 let waName = null;
 let waInitPromise = null;
+let reconnectTimer = null;
 let cachedGroups = [];
 
 // ─── Estado do Disparador Anti-Ban (Fila Humana com Rotação) ────────────────
@@ -223,15 +232,21 @@ function randomInt(min, max) {
   return Math.floor(Math.random() * (b - a + 1)) + a;
 }
 
-// Converte dataURL/base64 em Buffer
+// Converte dataURL/base64 em Buffer de forma segura e validada
 function parseImageData(dataUrl) {
   if (!dataUrl || typeof dataUrl !== "string") return null;
   const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
   if (match) {
-    return { mime: match[1], buffer: Buffer.from(match[2], "base64") };
+    try {
+      const buf = Buffer.from(match[2], "base64");
+      return buf.length > 0 ? { mime: match[1], buffer: buf } : null;
+    } catch (e) {
+      return null;
+    }
   }
   try {
-    return { mime: "image/jpeg", buffer: Buffer.from(dataUrl, "base64") };
+    const buf = Buffer.from(dataUrl, "base64");
+    return buf.length > 0 ? { mime: "image/jpeg", buffer: buf } : null;
   } catch (e) {
     return null;
   }
@@ -286,14 +301,12 @@ try {
 }
 
 function saveGroupMetaCache() {
-  try {
-    fs.writeFileSync(GROUP_META_CACHE_FILE, JSON.stringify(groupMetaCache, null, 2));
-  } catch (e) {}
+  safeWriteJson(GROUP_META_CACHE_FILE, groupMetaCache);
 }
 
 let isResolvingMeta = false;
 
-// Resolver metadados dos grupos que o WhatsApp não entregou o nome de primeira
+// Resolver metadados dos grupos que o WhatsApp não entregou o nome de primeira (com proteção contra rate-limit)
 async function resolveMissingGroupMetadata(groupsList) {
   if (isResolvingMeta || !waSocket || waStatus !== "CONNECTED") return;
   isResolvingMeta = true;
@@ -302,10 +315,12 @@ async function resolveMissingGroupMetadata(groupsList) {
     const missing = groupsList.filter((g) => !g.subject && g.id);
     if (missing.length === 0) return;
 
-    console.log(`🔍 [METADATA] Resolvendo nomes de ${missing.length} grupos em segundo plano...`);
+    // Limita a no máximo 25 grupos por ciclo para prevenir bloqueio por requisições em massa
+    const toResolve = missing.slice(0, 25);
+    console.log(`🔍 [METADATA] Resolvendo nomes de ${toResolve.length} grupos em segundo plano...`);
     let updatedCount = 0;
 
-    for (const item of missing) {
+    for (const item of toResolve) {
       if (groupMetaCache[item.id]?.subject) {
         item.subject = groupMetaCache[item.id].subject;
         item.size = groupMetaCache[item.id].size || item.size;
@@ -328,8 +343,13 @@ async function resolveMissingGroupMetadata(groupsList) {
           };
           updatedCount++;
         }
-        await delay(300);
-      } catch (err) {}
+        await delay(400);
+      } catch (err) {
+        if (err?.data === 429 || err?.status === 429) {
+          console.warn("⚠️ [METADATA] Rate limit temporário do WhatsApp atingido, pausando resolução.");
+          break;
+        }
+      }
     }
 
     if (updatedCount > 0) {
@@ -397,9 +417,10 @@ async function startHumanBroadcast({ targetGroupIds, source = "Painel Web" }) {
     throw new Error("WhatsApp não está conectado no momento.");
   }
 
-  // BLINDAGEM MÁXIMA: Garante que grupos ocultos NUNCA recebam mensagens
+  // BLINDAGEM MÁXIMA: Garante que grupos ocultos NUNCA recebam mensagens e remove duplicados
   const hiddenSet = new Set(appConfig.hiddenGroups || []);
-  const safeTargetGroupIds = (targetGroupIds || []).filter((id) => !hiddenSet.has(id));
+  const uniqueTargetIds = Array.from(new Set(targetGroupIds || []));
+  const safeTargetGroupIds = uniqueTargetIds.filter((id) => id && !hiddenSet.has(id));
 
   if (!safeTargetGroupIds || safeTargetGroupIds.length === 0) {
     throw new Error("Selecione pelo menos 1 grupo ativo para disparar (grupos ocultos nunca recebem anúncios).");
@@ -477,7 +498,11 @@ async function startHumanBroadcast({ targetGroupIds, source = "Painel Web" }) {
           chosenAd = activeAds[adIndex % activeAds.length];
           adIndex++;
         }
-        campaignState.currentAdName = chosenAd.name;
+        if (!chosenAd) chosenAd = activeAds[0];
+        if (!chosenAd) {
+          throw new Error("Nenhum anúncio ativo encontrado para este disparo.");
+        }
+        campaignState.currentAdName = chosenAd.name || "Anúncio";
 
         try {
           // 1. Simular digitação humana
@@ -504,6 +529,14 @@ async function startHumanBroadcast({ targetGroupIds, source = "Painel Web" }) {
           // 2. Humanizar texto com assinatura invisível única
           const finalCaption = humanizeText(chosenAd.caption || "", i);
           const imgParsed = parseImageData(chosenAd.imageBase64);
+
+          // Validação anti-envio vazio: se não há texto nem imagem, não envia bolha vazia
+          if (!finalCaption && (!imgParsed || !imgParsed.buffer)) {
+            console.warn(`⚠️ Anúncio "${chosenAd.name}" sem conteúdo válido. Pulando envio.`);
+            campaignState.failedCount++;
+            addCampaignLog(groupName, "WARN", `Anúncio [${chosenAd.name}] sem texto nem imagem válidos.`);
+            continue;
+          }
 
           // 3. Enviar imagem ou texto
           campaignState.statusText = `Enviando para "${groupName}" (${i + 1}/${orderedIds.length}) • ${chosenAd.name}...`;
@@ -534,9 +567,11 @@ async function startHumanBroadcast({ targetGroupIds, source = "Painel Web" }) {
           console.error(`❌ [ERRO DISPARO] ${groupName}:`, sendErr.message);
         }
 
-        // 4. Intervalo aleatório anti-ban entre grupos
+        // 4. Intervalo aleatório anti-ban entre grupos (com limites seguros)
         if (i < orderedIds.length - 1 && !campaignState.shouldStop) {
-          const waitSec = randomInt(appConfig.minDelaySec || 15, appConfig.maxDelaySec || 30);
+          const minDelay = Math.max(5, Number(appConfig.minDelaySec) || 15);
+          const maxDelay = Math.max(minDelay, Number(appConfig.maxDelaySec) || 30);
+          const waitSec = randomInt(minDelay, maxDelay);
           const nextName = groupMap.get(orderedIds[i + 1]) || orderedIds[i + 1];
 
           for (let remaining = waitSec; remaining > 0; remaining--) {
@@ -592,6 +627,10 @@ async function startHumanBroadcast({ targetGroupIds, source = "Painel Web" }) {
 // ─── Init WhatsApp ───────────────────────────────────────────────────────────
 async function initWhatsApp(forceReset = false) {
   if (forceReset) {
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
     if (waSocket) {
       try { waSocket.end(undefined); } catch (e) {}
     }
@@ -696,11 +735,8 @@ async function initWhatsApp(forceReset = false) {
               } catch (metaErr) {
                 await refreshGroups().catch(() => {});
               }
-            } else if (!jid.endsWith("@g.us") && !jid.includes("broadcast") && !jid.includes("@newsletter")) {
-              upsertPrivateChatFromBaileys(chat);
             }
           }
-          saveConversations();
         } catch (e) {
           console.error("Erro no listener chats.upsert:", e);
         }
@@ -819,13 +855,26 @@ async function initWhatsApp(forceReset = false) {
           waUser = null;
           waName = null;
 
+          if (reconnectTimer) clearTimeout(reconnectTimer);
           if (reconnect) {
-            setTimeout(() => initWhatsApp(), 3000);
+            console.log(`⚠️ [WHATSAPP] Conexão encerrada (código ${code || 'desconhecido'}). Reconectando em 3s...`);
+            reconnectTimer = setTimeout(() => {
+              reconnectTimer = null;
+              initWhatsApp().catch((err) => console.error("Erro na reconexão:", err));
+            }, 3000);
           } else {
+            console.log("⚠️ [WHATSAPP] Sessão desconectada pelo usuário. Resetando sessão...");
             try { fs.rmSync(SESSION_DIR, { recursive: true, force: true }); } catch (e) {}
-            setTimeout(() => initWhatsApp(), 2000);
+            reconnectTimer = setTimeout(() => {
+              reconnectTimer = null;
+              initWhatsApp().catch((err) => console.error("Erro ao reiniciar após logout:", err));
+            }, 2000);
           }
         } else if (connection === "open") {
+          if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+          }
           waStatus = "CONNECTED";
           waQrCode = null;
           waQrRaw = null;
@@ -2074,6 +2123,30 @@ app.get(["/", "/qr"], async (req, res) => {
       }
     }
 
+    function deleteAdFromGallery(id) {
+      const ad = adsList.find(a => a.id === id);
+      if (!ad) return;
+      if (!confirm('Deseja realmente excluir o anúncio "' + (ad.name || 'Sem nome') + '" permanentemente do banco?')) {
+        return;
+      }
+      adsList = adsList.filter(a => a.id !== id);
+      if (adsList.length === 0) {
+        adsList.push({
+          id: 'ad_' + Date.now(),
+          name: 'Anúncio 1',
+          caption: '',
+          enabled: true,
+          imageBase64: null
+        });
+      }
+      if (currentAdIndex >= adsList.length) {
+        currentAdIndex = Math.max(0, adsList.length - 1);
+      }
+      renderTabs();
+      renderGalleryGrid();
+      debounceSaveAds();
+    }
+
     let editingAdId = null;
     let modalImageData = null;
 
@@ -2240,31 +2313,37 @@ app.get(["/", "/qr"], async (req, res) => {
     function loadCurrentAdIntoEditor() {
       const ad = adsList[currentAdIndex];
       if (!ad) return;
-      document.getElementById('adNameInput').value = ad.name || '';
-      document.getElementById('adEnabledCheck').checked = !!ad.enabled;
-      document.getElementById('captionInput').value = ad.caption || '';
+      const nameEl = document.getElementById('adNameInput');
+      const checkEl = document.getElementById('adEnabledCheck');
+      const capEl = document.getElementById('captionInput');
+      if (nameEl) nameEl.value = ad.name || '';
+      if (checkEl) checkEl.checked = !!ad.enabled;
+      if (capEl) capEl.value = ad.caption || '';
 
       const placeholder = document.getElementById('uploadPlaceholder');
       const preview = document.getElementById('uploadPreview');
       const previewImg = document.getElementById('previewImg');
 
       if (ad.imageBase64) {
-        previewImg.src = ad.imageBase64;
-        placeholder.style.display = 'none';
-        preview.style.display = 'inline-block';
+        if (previewImg) previewImg.src = ad.imageBase64;
+        if (placeholder) placeholder.style.display = 'none';
+        if (preview) preview.style.display = 'inline-block';
       } else {
-        previewImg.src = '';
-        placeholder.style.display = 'block';
-        preview.style.display = 'none';
+        if (previewImg) previewImg.src = '';
+        if (placeholder) placeholder.style.display = 'block';
+        if (preview) preview.style.display = 'none';
       }
     }
 
     function onAdFieldChange() {
       const ad = adsList[currentAdIndex];
       if (!ad) return;
-      ad.name = document.getElementById('adNameInput').value;
-      ad.enabled = document.getElementById('adEnabledCheck').checked;
-      ad.caption = document.getElementById('captionInput').value;
+      const nameEl = document.getElementById('adNameInput');
+      const checkEl = document.getElementById('adEnabledCheck');
+      const capEl = document.getElementById('captionInput');
+      if (nameEl) ad.name = nameEl.value;
+      if (checkEl) ad.enabled = checkEl.checked;
+      if (capEl) ad.caption = capEl.value;
       renderTabs();
       debounceSaveAds();
     }
