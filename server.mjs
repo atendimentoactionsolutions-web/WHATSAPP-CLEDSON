@@ -409,14 +409,118 @@ async function refreshGroups() {
   }
 }
 
+// ─── Fila Persistente do Disparo (sobrevive a quedas e reinícios do servidor) ─
+const CAMPAIGN_QUEUE_FILE = path.join(DATA_DIR, "campaign_queue.json");
+let campaignQueue = null; // { id, orderedIds, nextIndex, adIndex, sentCount, failedCount, startedAt, source, logs }
+
+function saveCampaignQueue() {
+  if (!campaignQueue) return;
+  campaignQueue.sentCount = campaignState.sentCount;
+  campaignQueue.failedCount = campaignState.failedCount;
+  campaignQueue.logs = (campaignState.logs || []).slice(0, 60);
+  campaignQueue.isPaused = !!campaignState.isPaused;
+  safeWriteJson(CAMPAIGN_QUEUE_FILE, campaignQueue);
+}
+
+function clearCampaignQueue() {
+  campaignQueue = null;
+  try { fs.rmSync(CAMPAIGN_QUEUE_FILE, { force: true }); } catch (e) {}
+}
+
+function loadPendingCampaignQueue() {
+  try {
+    if (!fs.existsSync(CAMPAIGN_QUEUE_FILE)) return null;
+    const q = JSON.parse(fs.readFileSync(CAMPAIGN_QUEUE_FILE, "utf-8"));
+    if (q && Array.isArray(q.orderedIds) && q.nextIndex < q.orderedIds.length) return q;
+  } catch (e) {
+    console.error("Erro ao ler fila de disparo pendente:", e.message);
+  }
+  return null;
+}
+
+// Aguarda o WhatsApp voltar a ficar conectado (até maxWaitSec). Retorna true se conectou.
+async function waitForConnection(maxWaitSec = 600, label = "") {
+  let waited = 0;
+  while ((!waSocket || waStatus !== "CONNECTED") && waited < maxWaitSec) {
+    if (campaignState.shouldStop) return false;
+    campaignState.statusText = `⏳ WhatsApp reconectando... o disparo continua automaticamente (${waited}s)${label}`;
+    await delay(1000);
+    waited++;
+  }
+  if (waSocket && waStatus === "CONNECTED" && waited > 0) {
+    await delay(3000); // dá um respiro para a sessão estabilizar
+  }
+  return !!(waSocket && waStatus === "CONNECTED");
+}
+
+function isConnectionError(err) {
+  const msg = String(err?.message || err || "").toLowerCase();
+  return (
+    !waSocket ||
+    waStatus !== "CONNECTED" ||
+    msg.includes("connection closed") ||
+    msg.includes("connection lost") ||
+    msg.includes("timed out") ||
+    msg.includes("precondition") ||
+    msg.includes("internal-server-error") ||
+    msg.includes("socket") ||
+    msg.includes("stream")
+  );
+}
+
+let resumeInProgress = false;
+
+// Ao iniciar o servidor, recupera um disparo que estava em andamento
+{
+  const pending = loadPendingCampaignQueue();
+  if (pending) {
+    campaignQueue = pending;
+    campaignState.totalGroups = pending.orderedIds.length;
+    campaignState.sentCount = Number(pending.sentCount) || 0;
+    campaignState.failedCount = Number(pending.failedCount) || 0;
+    campaignState.logs = Array.isArray(pending.logs) ? pending.logs : [];
+    campaignState.statusText = `🔁 Disparo interrompido em ${campaignState.sentCount}/${campaignState.totalGroups}. Retomando automaticamente assim que o WhatsApp conectar...`;
+    console.log(`📦 [DISPARO] Fila pendente encontrada (${pending.nextIndex}/${pending.orderedIds.length}). Será retomada ao conectar.`);
+  }
+}
+async function tryResumePendingCampaign() {
+  if (resumeInProgress || campaignState.isRunning) return;
+  const q = loadPendingCampaignQueue();
+  if (!q) return;
+  resumeInProgress = true;
+  try {
+    console.log(`🔁 [DISPARO] Retomando disparo pendente ${q.id} a partir do grupo ${q.nextIndex + 1}/${q.orderedIds.length}...`);
+    await startHumanBroadcast({ targetGroupIds: q.orderedIds, source: q.source || "Painel Web", resume: q });
+  } catch (e) {
+    console.error("❌ Não foi possível retomar o disparo pendente:", e.message);
+  } finally {
+    resumeInProgress = false;
+  }
+}
+
+// Ao receber sinal de parada (pm2 restart/stop), salva a fila antes de sair
+for (const sig of ["SIGINT", "SIGTERM"]) {
+  process.on(sig, () => {
+    try { saveCampaignQueue(); } catch (e) {}
+    process.exit(0);
+  });
+}
+process.on("unhandledRejection", (r) => console.error("⚠️ unhandledRejection:", r?.message || r));
+process.on("uncaughtException", (e) => {
+  console.error("⚠️ uncaughtException:", e?.message || e);
+  try { saveCampaignQueue(); } catch (_) {}
+});
+
 // ─── Motor de Disparo Humano Anti-Ban com Mesclagem de Anúncios ─────────────
-async function startHumanBroadcast({ targetGroupIds, source = "Painel Web" }) {
+async function startHumanBroadcast({ targetGroupIds, source = "Painel Web", resume = null }) {
   if (campaignState.isRunning) {
     throw new Error("Já existe um disparo em andamento. Aguarde terminar ou pause o atual.");
   }
   if (!waSocket || waStatus !== "CONNECTED") {
     throw new Error("WhatsApp não está conectado no momento.");
   }
+  // Um novo disparo manual substitui qualquer fila pendente antiga
+  if (!resume) clearCampaignQueue();
 
   // BLINDAGEM MÁXIMA: Garante que grupos ocultos NUNCA recebam mensagens e remove duplicados
   const hiddenSet = new Set(appConfig.hiddenGroups || []);
@@ -441,39 +545,63 @@ async function startHumanBroadcast({ targetGroupIds, source = "Painel Web" }) {
   }
   const groupMap = new Map(cachedGroups.map((g) => [g.id, g.subject]));
 
-  const orderedIds = appConfig.shuffleGroups ? shuffleArray(safeTargetGroupIds) : [...safeTargetGroupIds];
+  const orderedIds = resume
+    ? [...resume.orderedIds]
+    : (appConfig.shuffleGroups ? shuffleArray(safeTargetGroupIds) : [...safeTargetGroupIds]);
+  const startIndex = resume ? Math.max(0, Number(resume.nextIndex) || 0) : 0;
 
-  const ignoredHiddenCount = (targetGroupIds || []).length - safeTargetGroupIds.length;
+  const ignoredHiddenCount = resume ? 0 : (targetGroupIds || []).length - safeTargetGroupIds.length;
   campaignState = {
     isRunning: true,
-    isPaused: false,
+    isPaused: resume ? !!resume.isPaused : false,
     shouldStop: false,
-    id: "camp_" + Date.now(),
-    startedAt: new Date().toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" }),
+    id: resume ? resume.id : "camp_" + Date.now(),
+    startedAt: resume ? resume.startedAt : new Date().toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" }),
     finishedAt: null,
     totalGroups: orderedIds.length,
-    sentCount: 0,
-    failedCount: 0,
+    sentCount: resume ? Number(resume.sentCount) || 0 : 0,
+    failedCount: resume ? Number(resume.failedCount) || 0 : 0,
     currentGroupName: null,
     currentAdName: null,
     nextActionInSec: 0,
-    statusText: `Iniciando disparo mesclado entre ${activeAds.length} anúncios...`,
-    logs: [],
+    statusText: resume
+      ? `Retomando disparo do grupo ${startIndex + 1}/${orderedIds.length}...`
+      : `Iniciando disparo mesclado entre ${activeAds.length} anúncios...`,
+    logs: resume && Array.isArray(resume.logs) ? resume.logs : [],
   };
 
-  addCampaignLog(
-    "Sistema",
-    "INFO",
-    `Disparo iniciado (${orderedIds.length} grupos)` +
-      (ignoredHiddenCount > 0 ? ` [${ignoredHiddenCount} ocultos protegidos]` : "") +
-      ` • Mesclando ${activeAds.length} anúncio(s) [${activeAds.map((a) => a.name).join(", ")}]`
-  );
+  campaignQueue = {
+    id: campaignState.id,
+    orderedIds,
+    nextIndex: startIndex,
+    adIndex: resume ? Number(resume.adIndex) || 0 : 0,
+    startedAt: campaignState.startedAt,
+    source,
+  };
+  saveCampaignQueue();
+
+  if (resume) {
+    addCampaignLog(
+      "Sistema",
+      "INFO",
+      `🔁 Disparo retomado automaticamente a partir do grupo ${startIndex + 1}/${orderedIds.length} (nada foi perdido).`
+    );
+  } else {
+    addCampaignLog(
+      "Sistema",
+      "INFO",
+      `Disparo iniciado (${orderedIds.length} grupos)` +
+        (ignoredHiddenCount > 0 ? ` [${ignoredHiddenCount} ocultos protegidos]` : "") +
+        ` • Mesclando ${activeAds.length} anúncio(s) [${activeAds.map((a) => a.name).join(", ")}]`
+    );
+  }
 
   // Executa em segundo plano
   (async () => {
-    let adIndex = 0;
+    let adIndex = campaignQueue.adIndex || 0;
+    let abortedForConnection = false;
     try {
-      for (let i = 0; i < orderedIds.length; i++) {
+      for (let i = startIndex; i < orderedIds.length; i++) {
         if (campaignState.shouldStop) {
           campaignState.statusText = "Disparo interrompido manualmente pelo usuário.";
           addCampaignLog("Sistema", "WARN", "Disparo cancelado manualmente.");
@@ -491,6 +619,13 @@ async function startHumanBroadcast({ targetGroupIds, source = "Painel Web" }) {
         const groupName = groupMap.get(jid) || jid;
         campaignState.currentGroupName = groupName;
 
+        // Segurança: se o grupo foi ocultado depois do início, nunca envia
+        if ((appConfig.hiddenGroups || []).includes(jid)) {
+          campaignQueue.nextIndex = i + 1;
+          saveCampaignQueue();
+          continue;
+        }
+
         // Escolhe o anúncio da rodada (Round-Robin ou Random)
         let chosenAd;
         if (appConfig.rotationMode === "random") {
@@ -505,56 +640,85 @@ async function startHumanBroadcast({ targetGroupIds, source = "Painel Web" }) {
         }
         campaignState.currentAdName = chosenAd.name || "Anúncio";
 
-        try {
-          // 1. Simular digitação humana
-          if (appConfig.simulateTyping) {
-            const typingSec = randomInt(3, 6);
-            campaignState.statusText = `Digitando no grupo "${groupName}" (${i + 1}/${orderedIds.length}) usando [${chosenAd.name}]...`;
-            try {
-              await waSocket.sendPresenceUpdate("composing", jid);
-            } catch (e) {}
+        // Se o WhatsApp caiu, espera reconectar em vez de perder o grupo
+        if (!(await waitForConnection(900, ` • próximo: "${groupName}"`))) {
+          if (campaignState.shouldStop) break;
+          abortedForConnection = true;
+          addCampaignLog("Sistema", "WARN", `WhatsApp ficou desconectado por muito tempo. Disparo salvo no grupo ${i + 1}/${orderedIds.length} e será retomado ao reconectar.`);
+          break;
+        }
 
-            for (let s = typingSec; s > 0; s--) {
-              if (campaignState.shouldStop) break;
-              campaignState.nextActionInSec = s;
-              await delay(1000);
+        // Até 3 tentativas por grupo quando o erro for de conexão
+        let delivered = false;
+        let lastErr = null;
+        for (let attempt = 1; attempt <= 3 && !delivered && !campaignState.shouldStop; attempt++) {
+          try {
+            // 1. Simular digitação humana
+            if (appConfig.simulateTyping && attempt === 1) {
+              const typingSec = randomInt(3, 6);
+              campaignState.statusText = `Digitando no grupo "${groupName}" (${i + 1}/${orderedIds.length}) usando [${chosenAd.name}]...`;
+              try {
+                await waSocket.sendPresenceUpdate("composing", jid);
+              } catch (e) {}
+
+              for (let s = typingSec; s > 0; s--) {
+                if (campaignState.shouldStop) break;
+                campaignState.nextActionInSec = s;
+                await delay(1000);
+              }
+
+              try {
+                await waSocket?.sendPresenceUpdate("paused", jid);
+              } catch (e) {}
             }
 
-            try {
-              await waSocket.sendPresenceUpdate("paused", jid);
-            } catch (e) {}
+            if (campaignState.shouldStop) break;
+
+            // 2. Humanizar texto com assinatura invisível única
+            const finalCaption = humanizeText(chosenAd.caption || "", i);
+            const imgParsed = parseImageData(chosenAd.imageBase64);
+
+            // Validação anti-envio vazio: se não há texto nem imagem, não envia bolha vazia
+            if (!finalCaption && (!imgParsed || !imgParsed.buffer)) {
+              console.warn(`⚠️ Anúncio "${chosenAd.name}" sem conteúdo válido. Pulando envio.`);
+              lastErr = new Error(`Anúncio [${chosenAd.name}] sem texto nem imagem válidos.`);
+              break;
+            }
+
+            if (!waSocket || waStatus !== "CONNECTED") {
+              throw new Error("Connection Closed");
+            }
+
+            // 3. Enviar imagem ou texto
+            campaignState.statusText = `Enviando para "${groupName}" (${i + 1}/${orderedIds.length}) • ${chosenAd.name}${attempt > 1 ? ` (tentativa ${attempt})` : ""}...`;
+            let sentMsg;
+            if (imgParsed && imgParsed.buffer) {
+              sentMsg = await waSocket.sendMessage(jid, {
+                image: imgParsed.buffer,
+                mimetype: imgParsed.mime || "image/jpeg",
+                caption: finalCaption,
+              });
+            } else {
+              sentMsg = await waSocket.sendMessage(jid, {
+                text: finalCaption,
+              });
+            }
+            saveMessageToStore(sentMsg);
+            delivered = true;
+          } catch (sendErr) {
+            lastErr = sendErr;
+            if (attempt < 3 && isConnectionError(sendErr)) {
+              console.warn(`⚠️ [DISPARO] Falha de conexão em "${groupName}" (tentativa ${attempt}). Aguardando reconectar...`);
+              await delay(3000);
+              const ok = await waitForConnection(900, ` • reenviando "${groupName}"`);
+              if (!ok) break;
+            } else {
+              break;
+            }
           }
+        }
 
-          if (campaignState.shouldStop) break;
-
-          // 2. Humanizar texto com assinatura invisível única
-          const finalCaption = humanizeText(chosenAd.caption || "", i);
-          const imgParsed = parseImageData(chosenAd.imageBase64);
-
-          // Validação anti-envio vazio: se não há texto nem imagem, não envia bolha vazia
-          if (!finalCaption && (!imgParsed || !imgParsed.buffer)) {
-            console.warn(`⚠️ Anúncio "${chosenAd.name}" sem conteúdo válido. Pulando envio.`);
-            campaignState.failedCount++;
-            addCampaignLog(groupName, "WARN", `Anúncio [${chosenAd.name}] sem texto nem imagem válidos.`);
-            continue;
-          }
-
-          // 3. Enviar imagem ou texto
-          campaignState.statusText = `Enviando para "${groupName}" (${i + 1}/${orderedIds.length}) • ${chosenAd.name}...`;
-          let sentMsg;
-          if (imgParsed && imgParsed.buffer) {
-            sentMsg = await waSocket.sendMessage(jid, {
-              image: imgParsed.buffer,
-              mimetype: imgParsed.mime || "image/jpeg",
-              caption: finalCaption,
-            });
-          } else {
-            sentMsg = await waSocket.sendMessage(jid, {
-              text: finalCaption,
-            });
-          }
-          saveMessageToStore(sentMsg);
-
+        if (delivered) {
           campaignState.sentCount++;
           addCampaignLog(
             groupName,
@@ -562,11 +726,24 @@ async function startHumanBroadcast({ targetGroupIds, source = "Painel Web" }) {
             `Enviado [${chosenAd.name}] (${campaignState.sentCount}/${orderedIds.length})`
           );
           console.log(`✅ [DISPARO ${campaignState.sentCount}/${orderedIds.length}] Enviado para ${groupName} com ${chosenAd.name}`);
-        } catch (sendErr) {
+        } else if (!campaignState.shouldStop) {
+          if (lastErr && isConnectionError(lastErr) && (!waSocket || waStatus !== "CONNECTED")) {
+            // Não conta como falha: mantém o grupo na fila para retomar depois
+            abortedForConnection = true;
+            addCampaignLog("Sistema", "WARN", `Conexão perdida. Disparo salvo no grupo ${i + 1}/${orderedIds.length} e será retomado ao reconectar.`);
+            break;
+          }
           campaignState.failedCount++;
-          addCampaignLog(groupName, "ERROR", `Falha: ${sendErr.message}`);
-          console.error(`❌ [ERRO DISPARO] ${groupName}:`, sendErr.message);
+          addCampaignLog(groupName, "ERROR", `Falha: ${lastErr?.message || "erro desconhecido"}`);
+          console.error(`❌ [ERRO DISPARO] ${groupName}:`, lastErr?.message);
         }
+
+        if (campaignState.shouldStop && !delivered) break;
+
+        // Salva o progresso após cada grupo (sobrevive a reinícios)
+        campaignQueue.nextIndex = i + 1;
+        campaignQueue.adIndex = adIndex;
+        saveCampaignQueue();
 
         // 4. Intervalo aleatório anti-ban entre grupos (com limites seguros)
         if (i < orderedIds.length - 1 && !campaignState.shouldStop) {
@@ -590,12 +767,24 @@ async function startHumanBroadcast({ targetGroupIds, source = "Painel Web" }) {
           }
         }
       }
+    } catch (loopErr) {
+      console.error("❌ [DISPARO] Erro inesperado no loop:", loopErr?.message || loopErr);
+      addCampaignLog("Sistema", "ERROR", `Erro inesperado: ${loopErr?.message || loopErr}. Progresso salvo.`);
+      abortedForConnection = true;
     } finally {
       campaignState.isRunning = false;
-      campaignState.isPaused = false;
       campaignState.nextActionInSec = 0;
       campaignState.currentGroupName = null;
       campaignState.currentAdName = null;
+
+      if (abortedForConnection && !campaignState.shouldStop) {
+        // Mantém a fila salva para retomar automaticamente quando reconectar
+        saveCampaignQueue();
+        campaignState.statusText = `⏸️ Disparo salvo em ${campaignState.sentCount}/${orderedIds.length}. Será retomado automaticamente ao reconectar.`;
+        return;
+      }
+      campaignState.isPaused = false;
+      clearCampaignQueue();
       campaignState.finishedAt = new Date().toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" });
 
       if (!campaignState.shouldStop) {
@@ -883,6 +1072,10 @@ async function initWhatsApp(forceReset = false) {
           waName = sock.user?.name || "Cledson";
           console.log("✅ [WHATSAPP CLEDSON] Conectado:", waUser, waName);
           setTimeout(() => refreshGroups().catch(() => {}), 2000);
+          // Se havia um disparo interrompido (queda/reinício), retoma de onde parou
+          setTimeout(() => {
+            if (waStatus === "CONNECTED") tryResumePendingCampaign().catch(() => {});
+          }, 12000);
         }
       });
 
@@ -951,7 +1144,7 @@ app.get("/status", (req, res) => {
     name: waName,
     hasQr: !!waQrCode,
     qrCodeDataUrl: waQrCode,
-    campaign: campaignState,
+    campaign: { ...campaignState, hasPending: !campaignState.isRunning && !!campaignQueue },
   };
   if (includeInit) {
     payload.config = {
@@ -1120,6 +1313,7 @@ app.post("/broadcast/pause", (req, res) => {
     return res.json({ success: false, message: "Nenhum disparo em andamento." });
   }
   campaignState.isPaused = !campaignState.isPaused;
+  saveCampaignQueue();
   const statusMsg = campaignState.isPaused ? "Disparo pausado." : "Disparo retomado.";
   addCampaignLog("Sistema", "INFO", statusMsg);
   res.json({ success: true, isPaused: campaignState.isPaused, message: statusMsg });
@@ -1130,6 +1324,12 @@ app.post("/broadcast/stop", (req, res) => {
   if (campaignState.isRunning) {
     campaignState.shouldStop = true;
     return res.json({ success: true, message: "Parando disparo..." });
+  }
+  // Parar também cancela qualquer disparo salvo aguardando retomada
+  if (loadPendingCampaignQueue()) {
+    clearCampaignQueue();
+    campaignState.statusText = "Disparo pendente cancelado.";
+    return res.json({ success: true, message: "Disparo pendente cancelado." });
   }
   res.json({ success: true, message: "Nenhum disparo rodando." });
 });
@@ -2889,8 +3089,8 @@ app.get(["/", "/qr"], async (req, res) => {
           const bar = document.getElementById('progressBar');
           const logsBox = document.getElementById('logsBox');
 
-          startBtn.disabled = c.isRunning;
-          stopBtn.style.display = c.isRunning ? 'block' : 'none';
+          startBtn.disabled = c.isRunning || c.hasPending;
+          stopBtn.style.display = (c.isRunning || c.hasPending) ? 'block' : 'none';
           
           if (pauseBtn) {
             pauseBtn.style.display = c.isRunning ? 'block' : 'none';
