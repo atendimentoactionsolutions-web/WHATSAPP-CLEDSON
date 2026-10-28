@@ -199,22 +199,9 @@ function addCampaignLog(groupName, status, detail) {
   if (campaignState.logs.length > 150) campaignState.logs.pop();
 }
 
-// Micro-variação invisível anti-ban no texto (zero-width + espaços aleatórios sutis)
-function humanizeText(baseText, index) {
-  if (!baseText) return "";
-  const zwChars = ["\u200B", "\u200C", "\u200D", "\uFEFF"];
-  const seed = Date.now() + index * 17;
-  const zw1 = zwChars[seed % zwChars.length];
-  const zw2 = zwChars[(seed >> 2) % zwChars.length];
-  const zw3 = zwChars[(seed >> 4) % zwChars.length];
-
-  const lines = baseText.split("\n");
-  if (lines.length > 1) {
-    lines[0] = lines[0] + zw1;
-    lines[lines.length - 1] = lines[lines.length - 1] + zw2 + zw3;
-    return lines.join("\n");
-  }
-  return baseText + zw1 + zw2;
+// Retorna o texto original sem qualquer alteração ou inserção de caracteres
+function humanizeText(baseText) {
+  return typeof baseText === "string" ? baseText : "";
 }
 
 function shuffleArray(arr) {
@@ -674,8 +661,8 @@ async function startHumanBroadcast({ targetGroupIds, source = "Painel Web", resu
 
             if (campaignState.shouldStop) break;
 
-            // 2. Humanizar texto com assinatura invisível única
-            const finalCaption = humanizeText(chosenAd.caption || "", i);
+            // 2. Texto original exato digitado pelo usuário (sem qualquer alteração)
+            const finalCaption = typeof chosenAd.caption === "string" ? chosenAd.caption : "";
             const imgParsed = parseImageData(chosenAd.imageBase64);
 
             // Validação anti-envio vazio: se não há texto nem imagem, não envia bolha vazia
