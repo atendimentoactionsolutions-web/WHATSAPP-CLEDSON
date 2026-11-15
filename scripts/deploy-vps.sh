@@ -35,7 +35,7 @@ mv "$release/node_modules" "$app/node_modules"
 for file in server.mjs delivery-store.mjs reliable-send.mjs signal-session-guard.mjs package.json package-lock.json README.md; do cp "$release/$file" "$app/$file"; done
 mkdir -p "$app/tests" "$app/scripts"
 cp "$release/tests/"*.mjs "$app/tests/"
-cp "$release/deploy-vps.sh" "$app/scripts/deploy-vps.sh"
+cp "$release/scripts/deploy-vps.sh" "$app/scripts/deploy-vps.sh"
 pm2 start whatsapp-cledson >/dev/null
 ready=0
 for attempt in $(seq 1 20); do
