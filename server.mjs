@@ -211,37 +211,9 @@ function addCampaignLog(groupName, status, detail) {
   if (campaignState.logs.length > 150) campaignState.logs.pop();
 }
 
-let safetyWatermark = { campaignId: null, rejected: 0, overdue: 0, repeatedRecovery: 0 };
-
 function acknowledgeSafetyPause() {
   campaignState.safetyReason = null;
-  if (!campaignState.id) return;
-  const stats = deliveryStore.summary(campaignState.id);
-  safetyWatermark = {
-    campaignId: campaignState.id,
-    rejected: stats.rejected || 0,
-    overdue: stats.overdue || 0,
-    repeatedRecovery: stats.repeatedRecovery || 0,
-  };
 }
-
-function pauseForDelivery(reason) {
-  if (!campaignState.isRunning) return;
-  campaignState.isPaused = true;
-  campaignState.safetyReason = 'Pausa de segurança: ' + reason;
-  addCampaignLog('Sistema', 'WARN', campaignState.safetyReason);
-  saveCampaignQueue();
-}
-setInterval(() => {
-  if (!campaignState.isRunning || campaignState.isPaused) return;
-  const stats = deliveryStore.summary(campaignState.id);
-  const wm = safetyWatermark.campaignId === campaignState.id
-    ? safetyWatermark
-    : { rejected: 0, overdue: 0, repeatedRecovery: 0 };
-  if (stats.rejected > wm.rejected || (stats.overdue >= 3 && stats.overdue > wm.overdue) || stats.repeatedRecovery > wm.repeatedRecovery) {
-    pauseForDelivery('Há erro, pedidos repetidos de recuperação ou 3 mensagens há mais de 2 minutos sem confirmação. Verifique os recebimentos antes de retomar.');
-  }
-}, 5000).unref();
 
 // Retorna o texto original sem qualquer alteração ou inserção de caracteres
 function humanizeText(baseText) {
@@ -743,7 +715,6 @@ async function startHumanBroadcast({ targetGroupIds, source = "Painel Web", resu
           } catch (sendErr) {
             lastErr = sendErr;
             if (sendErr.deliveryUncertain || sendErr.storageFailure) {
-              pauseForDelivery(sendErr.message);
               break;
             } else if (attempt < 3 && isConnectionError(sendErr)) {
               console.warn(`⚠️ [DISPARO] Falha de conexão em "${groupName}" (tentativa ${attempt}). Aguardando reconectar...`);
