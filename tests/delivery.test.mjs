@@ -109,3 +109,19 @@ test('sending a stored ad targets only the explicitly requested number and prese
   await handler({...req,body:{adId:'ad_33'}},res);
   assert.equal(res.code,400);assert.equal(calls.length,1);
 });
+test('internal audit reports media type, delivery/read participant counts, and retries per group',t=>{
+  const {store}=setup(t);
+  const m=msg('m_img','group1@g.us');
+  store.save(m,'camp_audit');store.submitted(m.key);
+  store.receipt(m.key,{userJid:'p1@s.whatsapp.net',receiptTimestamp:1000});
+  store.receipt(m.key,{userJid:'p2@s.whatsapp.net',receiptTimestamp:1001,readTimestamp:1002});
+  store.get(m.key,true);
+  const audit=store.audit({campaign:'camp_audit'});
+  assert.equal(audit.items.length,1);
+  assert.equal(audit.items[0].hasImage,true);
+  assert.equal(audit.items[0].mediaType,'image');
+  assert.equal(audit.items[0].preview,'Oferta');
+  assert.equal(audit.items[0].deliveredParticipants,2);
+  assert.equal(audit.items[0].readParticipants,1);
+  assert.equal(audit.items[0].retries,1);
+});

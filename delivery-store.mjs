@@ -77,6 +77,45 @@ export class DeliveryStore {
     return { ...row, meaning: 'Confirmação em grupo significa pelo menos um participante; não todos.' };
   }
   diagnostics() { return Object.fromEntries(this.db.prepare('SELECT name,count FROM diagnostics').all().map(r=>[r.name,r.count])); }
+  audit({ campaign = null, limit = 50 } = {}) {
+    const safeLimit = Math.max(1, Math.min(200, Number(limit) || 50));
+    const where = campaign ? 'WHERE m.campaign=?' : '';
+    const params = campaign ? [campaign, safeLimit] : [safeLimit];
+    const rows = this.db.prepare(`
+      SELECT m.jid, m.id, m.campaign, m.created, m.submitted, m.status, m.uncertain, m.retries, m.payload,
+        COUNT(DISTINCT CASE WHEN r.delivered > 0 THEN r.participant END) AS deliveredParticipants,
+        COUNT(DISTINCT CASE WHEN r.read_at > 0 THEN r.participant END) AS readParticipants
+      FROM messages m
+      LEFT JOIN receipts r ON r.jid=m.jid AND r.id=m.id
+      ${where}
+      GROUP BY m.jid, m.id
+      ORDER BY m.created DESC
+      LIMIT ?
+    `).all(...params);
+    return {
+      diagnostics: this.diagnostics(),
+      items: rows.map(row => {
+        const msg = proto.Message.decode(row.payload);
+        const mediaType = msg?.imageMessage ? 'image' : msg?.videoMessage ? 'video' : msg?.documentMessage ? 'document' : 'text';
+        const rawText = msg?.imageMessage?.caption || msg?.videoMessage?.caption || msg?.extendedTextMessage?.text || msg?.conversation || '';
+        return {
+          jid: row.jid,
+          id: row.id,
+          campaign: row.campaign,
+          createdAt: new Date(row.created).toISOString(),
+          submittedAt: row.submitted ? new Date(row.submitted).toISOString() : null,
+          status: row.status,
+          uncertain: !!row.uncertain,
+          retries: row.retries,
+          mediaType,
+          hasImage: mediaType === 'image',
+          preview: rawText.slice(0, 60),
+          deliveredParticipants: row.deliveredParticipants || 0,
+          readParticipants: row.readParticipants || 0,
+        };
+      }),
+    };
+  }
   prune(now = Date.now()) {
     this.db.prepare('DELETE FROM messages WHERE created < ?').run(now - 30*86400000);
     this.db.prepare('DELETE FROM messages WHERE rowid IN (SELECT rowid FROM messages ORDER BY created DESC LIMIT -1 OFFSET 50000)').run();

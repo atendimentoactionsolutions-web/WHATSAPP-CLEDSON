@@ -1203,6 +1203,29 @@ app.get("/status", (req, res) => {
   res.json(payload);
 });
 
+// Auditoria interna (somente TI via chave de API; nunca envia mensagens nem aparece no painel)
+app.get("/audit/delivery", (req, res) => {
+  const key = req.headers["x-api-key"] || req.query.key;
+  if (key !== API_SECRET) return res.status(401).json({ error: "Unauthorized" });
+  const groupMap = new Map(cachedGroups.map(g => [g.id, g]));
+  const result = deliveryStore.audit({
+    campaign: typeof req.query.campaign === "string" && req.query.campaign.trim() ? req.query.campaign.trim() : null,
+    limit: req.query.limit,
+  });
+  res.json({
+    protocolNote: "deliveredParticipants confirma que os aparelhos descriptografaram o protobuf (incluindo imagem/legenda); readParticipants confirma abertura do chat. Em grupos de Avisos de Comunidade, o WhatsApp pode suprimir recibos individuais.",
+    diagnostics: result.diagnostics,
+    items: result.items.map(item => {
+      const g = groupMap.get(item.jid);
+      return {
+        ...item,
+        groupName: g?.subject || null,
+        groupSize: g?.size || null,
+      };
+    }),
+  });
+});
+
 // GET /test-fetch-meta
 app.get("/test-fetch-meta", async (req, res) => {
   if (!waSocket || waStatus !== "CONNECTED") return res.status(503).json({ error: "WA offline" });
