@@ -1,8 +1,11 @@
+import "./signal-session-guard.mjs";
 import express from "express";
 import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
-  fetchLatestBaileysVersion,
+  generateWAMessage,
+  generateMessageIDV2,
+  areJidsSameUser,
   makeCacheableSignalKeyStore,
   downloadMediaMessage,
   delay,
@@ -12,6 +15,8 @@ import { fileURLToPath } from "url";
 import path from "path";
 import fs from "fs";
 import QRCode from "qrcode";
+import { DeliveryStore } from "./delivery-store.mjs";
+import { reliableSend } from "./reliable-send.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SESSION_DIR = path.join(__dirname, ".wa-session");
@@ -25,7 +30,7 @@ if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-const logger = pino({ level: "silent" });
+const logger = pino({ level: "warn" });
 
 // ─── Persistência de Configuração e Anúncios Múltiplos ───
 const defaultConfig = {
@@ -131,18 +136,25 @@ function saveAds() {
   safeWriteJson(ADS_FILE, appAds);
 }
 
-// ─── Cache em Memória de Mensagens ───
-const messageStore = new Map();
+// Persistent, bounded recovery storage; credentials remain in their existing session.
+const deliveryStore = new DeliveryStore(path.join(DATA_DIR, "delivery.sqlite"));
+deliveryStore.prune();
+setInterval(() => deliveryStore.prune(), 3600000).unref();
+function saveMessageToStore(msg) { deliveryStore.save(msg); }
 
-function saveMessageToStore(msg) {
-  if (!msg || !msg.key || !msg.key.id) return;
-  const key = `${msg.key.remoteJid}:${msg.key.id}`;
-  messageStore.set(key, msg.message);
-  messageStore.set(msg.key.id, msg.message);
-  if (messageStore.size > 2000) {
-    const firstKey = messageStore.keys().next().value;
-    if (firstKey) messageStore.delete(firstKey);
-  }
+async function sendTrackedMessage(socket, jid, content, campaign = null) {
+  return reliableSend({
+    socket, store: deliveryStore, jid, content, campaign,
+    generate: (target, payload) => generateWAMessage(target, payload, {
+      userJid: socket.user.id, upload: socket.waUploadToServer, logger,
+      messageId: generateMessageIDV2(socket.user.id),
+    }),
+    prepareGroup: async (target) => {
+      // Redistribute the EXISTING sender key to current devices. Never delete
+      // the encryption/session keys. Baileys uses this same marker on retries.
+      await socket.authState.keys.set({ 'sender-key-memory': { [target]: null } });
+    },
+  });
 }
 
 class SimpleNodeCache {
@@ -198,6 +210,38 @@ function addCampaignLog(groupName, status, detail) {
   campaignState.logs.unshift({ time, groupName, status, detail });
   if (campaignState.logs.length > 150) campaignState.logs.pop();
 }
+
+let safetyWatermark = { campaignId: null, rejected: 0, overdue: 0, repeatedRecovery: 0 };
+
+function acknowledgeSafetyPause() {
+  campaignState.safetyReason = null;
+  if (!campaignState.id) return;
+  const stats = deliveryStore.summary(campaignState.id);
+  safetyWatermark = {
+    campaignId: campaignState.id,
+    rejected: stats.rejected || 0,
+    overdue: stats.overdue || 0,
+    repeatedRecovery: stats.repeatedRecovery || 0,
+  };
+}
+
+function pauseForDelivery(reason) {
+  if (!campaignState.isRunning) return;
+  campaignState.isPaused = true;
+  campaignState.safetyReason = 'Pausa de segurança: ' + reason;
+  addCampaignLog('Sistema', 'WARN', campaignState.safetyReason);
+  saveCampaignQueue();
+}
+setInterval(() => {
+  if (!campaignState.isRunning || campaignState.isPaused) return;
+  const stats = deliveryStore.summary(campaignState.id);
+  const wm = safetyWatermark.campaignId === campaignState.id
+    ? safetyWatermark
+    : { rejected: 0, overdue: 0, repeatedRecovery: 0 };
+  if (stats.rejected > wm.rejected || (stats.overdue >= 3 && stats.overdue > wm.overdue) || stats.repeatedRecovery > wm.repeatedRecovery) {
+    pauseForDelivery('Há erro, pedidos repetidos de recuperação ou 3 mensagens há mais de 2 minutos sem confirmação. Verifique os recebimentos antes de retomar.');
+  }
+}, 5000).unref();
 
 // Retorna o texto original sem qualquer alteração ou inserção de caracteres
 function humanizeText(baseText) {
@@ -406,6 +450,7 @@ function saveCampaignQueue() {
   campaignQueue.failedCount = campaignState.failedCount;
   campaignQueue.logs = (campaignState.logs || []).slice(0, 60);
   campaignQueue.isPaused = !!campaignState.isPaused;
+  campaignQueue.safetyReason = campaignState.safetyReason || null;
   safeWriteJson(CAMPAIGN_QUEUE_FILE, campaignQueue);
 }
 
@@ -462,6 +507,8 @@ let resumeInProgress = false;
   const pending = loadPendingCampaignQueue();
   if (pending) {
     campaignQueue = pending;
+    campaignState.id = pending.id;
+    campaignState.safetyReason = pending.safetyReason || null;
     campaignState.totalGroups = pending.orderedIds.length;
     campaignState.sentCount = Number(pending.sentCount) || 0;
     campaignState.failedCount = Number(pending.failedCount) || 0;
@@ -541,6 +588,7 @@ async function startHumanBroadcast({ targetGroupIds, source = "Painel Web", resu
   campaignState = {
     isRunning: true,
     isPaused: resume ? !!resume.isPaused : false,
+    safetyReason: resume?.safetyReason || null,
     shouldStop: false,
     id: resume ? resume.id : "camp_" + Date.now(),
     startedAt: resume ? resume.startedAt : new Date().toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" }),
@@ -680,21 +728,24 @@ async function startHumanBroadcast({ targetGroupIds, source = "Painel Web", resu
             campaignState.statusText = `Enviando para "${groupName}" (${i + 1}/${orderedIds.length}) • ${chosenAd.name}${attempt > 1 ? ` (tentativa ${attempt})` : ""}...`;
             let sentMsg;
             if (imgParsed && imgParsed.buffer) {
-              sentMsg = await waSocket.sendMessage(jid, {
+              sentMsg = await sendTrackedMessage(waSocket, jid, {
                 image: imgParsed.buffer,
                 mimetype: imgParsed.mime || "image/jpeg",
                 caption: finalCaption,
-              });
+              }, campaignState.id);
             } else {
-              sentMsg = await waSocket.sendMessage(jid, {
+              sentMsg = await sendTrackedMessage(waSocket, jid, {
                 text: finalCaption,
-              });
+              }, campaignState.id);
             }
             saveMessageToStore(sentMsg);
             delivered = true;
           } catch (sendErr) {
             lastErr = sendErr;
-            if (attempt < 3 && isConnectionError(sendErr)) {
+            if (sendErr.deliveryUncertain || sendErr.storageFailure) {
+              pauseForDelivery(sendErr.message);
+              break;
+            } else if (attempt < 3 && isConnectionError(sendErr)) {
               console.warn(`⚠️ [DISPARO] Falha de conexão em "${groupName}" (tentativa ${attempt}). Aguardando reconectar...`);
               await delay(3000);
               const ok = await waitForConnection(900, ` • reenviando "${groupName}"`);
@@ -709,12 +760,12 @@ async function startHumanBroadcast({ targetGroupIds, source = "Painel Web", resu
           campaignState.sentCount++;
           addCampaignLog(
             groupName,
-            "SUCCESS",
-            `Enviado [${chosenAd.name}] (${campaignState.sentCount}/${orderedIds.length})`
+            "INFO",
+            `Submetido ao WhatsApp; recebimento pendente [${chosenAd.name}] (${campaignState.sentCount}/${orderedIds.length})`
           );
           console.log(`✅ [DISPARO ${campaignState.sentCount}/${orderedIds.length}] Enviado para ${groupName} com ${chosenAd.name}`);
         } else if (!campaignState.shouldStop) {
-          if (lastErr && isConnectionError(lastErr) && (!waSocket || waStatus !== "CONNECTED")) {
+          if (lastErr && !lastErr.deliveryUncertain && isConnectionError(lastErr) && (!waSocket || waStatus !== "CONNECTED")) {
             // Não conta como falha: mantém o grupo na fila para retomar depois
             abortedForConnection = true;
             addCampaignLog("Sistema", "WARN", `Conexão perdida. Disparo salvo no grupo ${i + 1}/${orderedIds.length} e será retomado ao reconectar.`);
@@ -775,11 +826,11 @@ async function startHumanBroadcast({ targetGroupIds, source = "Painel Web", resu
       campaignState.finishedAt = new Date().toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" });
 
       if (!campaignState.shouldStop) {
-        campaignState.statusText = `Concluído! ${campaignState.sentCount} enviados com sucesso, ${campaignState.failedCount} falhas.`;
+        campaignState.statusText = `Envios encerrados: ${campaignState.sentCount} submetidos ao WhatsApp, ${campaignState.failedCount} erros de envio. Consulte as confirmações de recebimento.`;
         addCampaignLog(
           "Sistema",
           "DONE",
-          `Finalizado: ${campaignState.sentCount} enviados, ${campaignState.failedCount} falhas.`
+          `Finalizado: ${campaignState.sentCount} submissões, ${campaignState.failedCount} erros. Recebimento acompanhado separadamente.`
         );
       }
 
@@ -834,14 +885,7 @@ async function initWhatsApp(forceReset = false) {
       console.log("🔄 [WHATSAPP CLEDSON] Conectando ao WhatsApp...");
 
       const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
-      let version = [2, 3000, 1043857760];
-      try {
-        const v = await fetchLatestBaileysVersion();
-        if (v?.version) version = v.version;
-      } catch (e) {}
-
       const sock = makeWASocket({
-        version,
         logger,
         auth: {
           creds: state.creds,
@@ -850,17 +894,25 @@ async function initWhatsApp(forceReset = false) {
         msgRetryCounterCache,
         browser: ["WhatsApp Cledson", "Chrome", "124.0.0.0"],
         syncFullHistory: false,
-        markOnlineOnConnect: true,
+        markOnlineOnConnect: false,
         generateHighQualityLinkPreview: true,
-        getMessage: async (key) => {
-          if (!key) return undefined;
-          const fullKey = `${key.remoteJid}:${key.id}`;
-          return messageStore.get(fullKey) || messageStore.get(key.id) || undefined;
-        },
+        getMessage: async (key) => deliveryStore.get(key, true),
       });
 
       waSocket = sock;
       sock.ev.on("creds.update", saveCreds);
+      sock.ev.on("messages.update", (updates) => {
+        for (const { key, update } of updates) deliveryStore.update(key, update.status);
+      });
+      sock.ev.on("message-receipt.update", (updates) => {
+        deliveryStore.db.transaction(() => {
+        for (const { key, receipt } of updates) {
+          // A receipt from our own linked phone does not prove customer delivery.
+          if ([sock.user?.id, sock.user?.lid].filter(Boolean).some(id => areJidsSameUser(id, receipt.userJid || ''))) continue;
+          deliveryStore.receipt(key, receipt);
+        }
+        })();
+      });
 
       // ─── Detecção Automática e Instantânea de Novos Grupos (100% sem fantasmas) ───
       // 1. Quando você entra em um grupo ou alguém te adiciona
@@ -966,6 +1018,8 @@ async function initWhatsApp(forceReset = false) {
           if (/^#continuar$/i.test(trimmed)) {
             if (campaignState.isRunning && campaignState.isPaused) {
               campaignState.isPaused = false;
+              acknowledgeSafetyPause();
+              saveCampaignQueue();
               await sock.sendMessage(remoteJid, { text: "▶️ Disparo retomado com sucesso!" });
             } else {
               await sock.sendMessage(remoteJid, { text: "ℹ️ O disparo não está pausado." });
@@ -1010,6 +1064,7 @@ async function initWhatsApp(forceReset = false) {
       });
 
       sock.ev.on("connection.update", async (update) => {
+        if (waSocket !== sock) return; // Ignore events from a replaced socket.
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
@@ -1131,6 +1186,8 @@ app.get("/status", (req, res) => {
     name: waName,
     hasQr: !!waQrCode,
     qrCodeDataUrl: waQrCode,
+    delivery: deliveryStore.summary(campaignState.id || appConfig.history[0]?.id),
+    recovery: deliveryStore.diagnostics(),
     campaign: { ...campaignState, hasPending: !campaignState.isRunning && !!campaignQueue },
   };
   if (includeInit) {
@@ -1300,6 +1357,7 @@ app.post("/broadcast/pause", (req, res) => {
     return res.json({ success: false, message: "Nenhum disparo em andamento." });
   }
   campaignState.isPaused = !campaignState.isPaused;
+  if (!campaignState.isPaused) acknowledgeSafetyPause();
   saveCampaignQueue();
   const statusMsg = campaignState.isPaused ? "Disparo pausado." : "Disparo retomado.";
   addCampaignLog("Sistema", "INFO", statusMsg);
@@ -3095,8 +3153,13 @@ app.get(["/", "/qr"], async (req, res) => {
           const doneCount = (c.sentCount || 0) + (c.failedCount || 0);
           const pct = c.totalGroups > 0 ? Math.round((doneCount / c.totalGroups) * 100) : 0;
           bar.style.width = pct + '%';
-          counters.innerText = \`\${c.sentCount || 0} / \${c.totalGroups || 0} enviados\`;
-          statusTxt.innerText = c.statusText || 'Pronto.';
+          counters.innerText = \`\${c.sentCount || 0} / \${c.totalGroups || 0} submetidos ao WhatsApp\`;
+          const d = data.delivery || {};
+          statusTxt.innerText = (c.safetyReason || c.statusText || 'Pronto.') +
+            '\\nRecebimento em pelo menos um destinatário: ' + (d.confirmed || 0) +
+            ' • Sem confirmação: ' + (d.unconfirmed || 0) +
+            ' • Erros informados pelo WhatsApp: ' + (d.rejected || 0) +
+            '\\nEm grupos, uma confirmação não significa que todos receberam. Envios anteriores à atualização não têm rastreamento.';
 
           if (Array.isArray(c.logs) && c.logs.length > 0) {
             logsBox.innerHTML = c.logs.map(l => \`
@@ -3125,11 +3188,13 @@ app.post("/send", async (req, res) => {
   const key = req.headers["x-api-key"] || req.query.key;
   if (key && key !== API_SECRET) return res.status(401).json({ error: "Unauthorized" });
 
-  const { phone, jid, message, text } = req.body;
+  const { phone, jid, message, text, adId } = req.body;
   const msgContent = message || text;
+  const storedAd = adId ? appAds.find(ad => ad.id === adId) : null;
+  if (adId && !storedAd) return res.status(404).json({ success: false, error: "Anúncio não encontrado." });
 
-  if ((!phone && !jid) || !msgContent) {
-    return res.status(400).json({ success: false, error: "phone/jid e message/text são obrigatórios" });
+  if ((!phone && !jid) || (!msgContent && !storedAd)) {
+    return res.status(400).json({ success: false, error: "phone/jid e message/text ou adId são obrigatórios" });
   }
 
   try {
@@ -3150,12 +3215,19 @@ app.post("/send", async (req, res) => {
       } catch (e) {}
     }
 
-    const sentMsg = await waSocket.sendMessage(targetJid, { text: msgContent });
+    let content = { text: msgContent };
+    if (storedAd) {
+      const image = parseImageData(storedAd.imageBase64);
+      const caption = typeof storedAd.caption === "string" ? storedAd.caption : "";
+      if (!image?.buffer && !caption.trim()) return res.status(400).json({ success: false, error: "Anúncio vazio." });
+      content = image?.buffer ? { image: image.buffer, mimetype: image.mime || "image/jpeg", caption } : { text: caption };
+    }
+    const sentMsg = await sendTrackedMessage(waSocket, targetJid, content, "manual");
     saveMessageToStore(sentMsg);
 
-    return res.json({ success: true, jid: targetJid });
+    return res.json({ success: true, jid: targetJid, messageId: sentMsg.key.id, delivery: "unconfirmed" });
   } catch (err) {
-    return res.status(500).json({ success: false, error: err.message });
+    return res.status(500).json({ success: false, error: err.message, messageId: err.messageKey?.id, delivery: err.deliveryUncertain ? "unconfirmed" : undefined });
   }
 });
 
