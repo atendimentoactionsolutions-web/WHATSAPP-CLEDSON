@@ -17,7 +17,7 @@ import fs from "fs";
 import QRCode from "qrcode";
 import { DeliveryStore } from "./delivery-store.mjs";
 import { reliableSend } from "./reliable-send.mjs";
-import { createRetryGuardCache, attachBaileysStabilityGuard } from "./baileys-stability-guard.mjs";
+import { createRetryGuardCache, createNoopPlaceholderCache, attachBaileysStabilityGuard } from "./baileys-stability-guard.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SESSION_DIR = path.join(__dirname, ".wa-session");
@@ -159,6 +159,7 @@ async function sendTrackedMessage(socket, jid, content, campaign = null) {
 }
 
 const msgRetryCounterCache = createRetryGuardCache({ maxRetries: 5, maxSize: 5000, maxExhausted: 2000 });
+const placeholderResendCache = createNoopPlaceholderCache();
 let activeSocketGuard = null;
 
 // ─── Estado Global WhatsApp & Grupos ─────────────────────────────────────────
@@ -848,6 +849,8 @@ async function initWhatsApp(forceReset = false) {
           keys: makeCacheableSignalKeyStore(state.keys, logger),
         },
         msgRetryCounterCache,
+        placeholderResendCache,
+        shouldIgnoreJid: (jid) => jid === "status@broadcast" || String(jid || "").endsWith("@newsletter"),
         browser: ["WhatsApp Cledson", "Chrome", "124.0.0.0"],
         syncFullHistory: false,
         markOnlineOnConnect: false,

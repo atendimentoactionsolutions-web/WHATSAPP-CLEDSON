@@ -8,6 +8,18 @@
 
 export const PARSING_ERROR_NACK = 487;
 
+// Prevents Baileys's requestPlaceholderResend from sleeping 5000ms per
+// undecryptable/unavailable group message inside offlineNodeProcessor & retryMutex,
+// which otherwise stalls receipt and customer-retry handling for 40+ minutes.
+export function createNoopPlaceholderCache() {
+  return {
+    get: () => true,
+    set: () => true,
+    del: () => 1,
+    flushAll: () => {},
+  };
+}
+
 export function createRetryGuardCache({ maxRetries = 5, maxSize = 5000, maxExhausted = 2000 } = {}) {
   const map = new Map();
   const exhausted = new Set();

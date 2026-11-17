@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import EventEmitter from 'node:events';
-import { createRetryGuardCache, attachBaileysStabilityGuard, PARSING_ERROR_NACK } from '../baileys-stability-guard.mjs';
+import { createRetryGuardCache, createNoopPlaceholderCache, attachBaileysStabilityGuard, PARSING_ERROR_NACK } from '../baileys-stability-guard.mjs';
 
 test('exhausted incoming message retry triggers ParsingError nack (487) and prevents retry loops', async () => {
   const ws = new EventEmitter();
@@ -73,4 +73,12 @@ test('stuck Baileys event buffer is flushed on consecutive buffering ticks and d
 
   ev.emit('connection.update', { connection: 'close' });
   assert.equal(guard.checkBuffer(), false);
+});
+
+test('noop placeholder cache short-circuits 5s resend delays without breaking cache contract', () => {
+  const cache = createNoopPlaceholderCache();
+  assert.equal(cache.get('any-id'), true);
+  assert.equal(cache.set('any-id', true), true);
+  assert.equal(cache.del('any-id'), 1);
+  assert.doesNotThrow(() => cache.flushAll());
 });
