@@ -17,6 +17,7 @@ import fs from "fs";
 import QRCode from "qrcode";
 import { DeliveryStore } from "./delivery-store.mjs";
 import { reliableSend } from "./reliable-send.mjs";
+import { createRetryGuardCache, attachBaileysStabilityGuard } from "./baileys-stability-guard.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SESSION_DIR = path.join(__dirname, ".wa-session");
@@ -157,24 +158,8 @@ async function sendTrackedMessage(socket, jid, content, campaign = null) {
   });
 }
 
-class SimpleNodeCache {
-  constructor() {
-    this.map = new Map();
-  }
-  get(k) { return this.map.get(k); }
-  set(k, v) {
-    this.map.set(k, v);
-    if (this.map.size > 5000) {
-      const firstKey = this.map.keys().next().value;
-      if (firstKey) this.map.delete(firstKey);
-    }
-    return true;
-  }
-  del(k) { this.map.delete(k); return 1; }
-  flushAll() { this.map.clear(); }
-}
-
-const msgRetryCounterCache = new SimpleNodeCache();
+const msgRetryCounterCache = createRetryGuardCache({ maxRetries: 5, maxSize: 5000, maxExhausted: 2000 });
+let activeSocketGuard = null;
 
 // ─── Estado Global WhatsApp & Grupos ─────────────────────────────────────────
 let waSocket = null;
@@ -871,6 +856,12 @@ async function initWhatsApp(forceReset = false) {
       });
 
       waSocket = sock;
+      if (activeSocketGuard) activeSocketGuard.stop();
+      activeSocketGuard = attachBaileysStabilityGuard({
+        sock,
+        retryCache: msgRetryCounterCache,
+        logger,
+      });
       sock.ev.on("creds.update", saveCreds);
       sock.ev.on("messages.update", (updates) => {
         for (const { key, update } of updates) deliveryStore.update(key, update.status);
@@ -1186,6 +1177,10 @@ app.get("/audit/delivery", (req, res) => {
   res.json({
     protocolNote: "deliveredParticipants confirma que os aparelhos descriptografaram o protobuf (incluindo imagem/legenda); readParticipants confirma abertura do chat. Em grupos de Avisos de Comunidade, o WhatsApp pode suprimir recibos individuais.",
     diagnostics: result.diagnostics,
+    stability: {
+      evBuffering: !!waSocket?.ev?.isBuffering?.(),
+      ...(activeSocketGuard?.stats || {}),
+    },
     items: result.items.map(item => {
       const g = groupMap.get(item.jid);
       return {

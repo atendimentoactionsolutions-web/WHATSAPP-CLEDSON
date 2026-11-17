@@ -8,7 +8,8 @@ export class DeliveryStore {
     this.db = new Database(filename);
     fs.chmodSync(filename, 0o600);
     this.db.pragma('journal_mode = WAL');
-    this.db.pragma('synchronous = FULL');
+    this.db.pragma('synchronous = NORMAL');
+    this.db.pragma('busy_timeout = 3000');
     this.db.pragma('foreign_keys = ON');
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS messages (
@@ -119,7 +120,7 @@ export class DeliveryStore {
   prune(now = Date.now()) {
     this.db.prepare('DELETE FROM messages WHERE created < ?').run(now - 30*86400000);
     this.db.prepare('DELETE FROM messages WHERE rowid IN (SELECT rowid FROM messages ORDER BY created DESC LIMIT -1 OFFSET 50000)').run();
-    this.db.pragma('wal_checkpoint(PASSIVE)');
+    this.db.pragma('wal_checkpoint(TRUNCATE)');
   }
   close() { this.db.close(); }
 }

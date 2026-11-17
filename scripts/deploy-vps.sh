@@ -32,7 +32,7 @@ chmod 600 "$backup/application.tar.gz"
 if test -f "$app/package-lock.json"; then touch "$backup/had-lockfile"; fi
 mv "$app/node_modules" "$backup/node_modules"
 mv "$release/node_modules" "$app/node_modules"
-for file in server.mjs delivery-store.mjs reliable-send.mjs signal-session-guard.mjs package.json package-lock.json README.md; do cp "$release/$file" "$app/$file"; done
+for file in server.mjs delivery-store.mjs reliable-send.mjs signal-session-guard.mjs baileys-stability-guard.mjs package.json package-lock.json README.md; do cp "$release/$file" "$app/$file"; done
 mkdir -p "$app/tests" "$app/scripts"
 cp "$release/tests/"*.mjs "$app/tests/"
 cp "$release/scripts/deploy-vps.sh" "$app/scripts/deploy-vps.sh"
