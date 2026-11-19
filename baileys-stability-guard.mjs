@@ -113,13 +113,18 @@ export function attachBaileysStabilityGuard({
     exhaustedNacksSent: 0,
     ignoredGroupMessagesAcked: 0,
     offlinePreviews: 0,
+    offlineBatchesRequested: 0,
     offlineCompleted: 0,
+    lastOfflinePreview: null,
     receiptsReceived: 0,
     notificationsReceived: 0,
     messagesReceived: 0,
     lastForcedFlushAt: null,
     lastExhaustedNackAt: null,
   };
+
+  let offlineInProgress = false;
+  let lastOfflineActivityAt = 0;
 
   const trackNode = (node) => {
     const id = node?.attrs?.id;
@@ -137,10 +142,27 @@ export function attachBaileysStabilityGuard({
 
   let originalMessageListeners = null;
   let wrappedMessageListener = null;
-  const onOfflinePreview = () => { stats.offlinePreviews += 1; };
-  const onOfflineComplete = () => { stats.offlineCompleted += 1; };
-  const onReceipt = () => { stats.receiptsReceived += 1; };
-  const onNotification = () => { stats.notificationsReceived += 1; };
+  const onOfflinePreview = (node) => {
+    stats.offlinePreviews += 1;
+    offlineInProgress = true;
+    lastOfflineActivityAt = Date.now();
+    const previewChild = Array.isArray(node?.content)
+      ? node.content.find((c) => c?.tag === 'offline_preview')
+      : null;
+    if (previewChild?.attrs) stats.lastOfflinePreview = { ...previewChild.attrs };
+  };
+  const onOfflineComplete = () => {
+    stats.offlineCompleted += 1;
+    offlineInProgress = false;
+  };
+  const onReceipt = () => {
+    stats.receiptsReceived += 1;
+    if (offlineInProgress) lastOfflineActivityAt = Date.now();
+  };
+  const onNotification = () => {
+    stats.notificationsReceived += 1;
+    if (offlineInProgress) lastOfflineActivityAt = Date.now();
+  };
 
   if (sock.ws && typeof sock.ws.on === 'function') {
     sock.ws.on('CB:ib,,offline_preview', onOfflinePreview);
@@ -152,6 +174,7 @@ export function attachBaileysStabilityGuard({
       sock.ws.removeAllListeners('CB:message');
       wrappedMessageListener = (node) => {
         stats.messagesReceived += 1;
+        if (offlineInProgress) lastOfflineActivityAt = Date.now();
         const me = sock.user || sock.authState?.creds?.me;
         if (shouldAckIncomingGroupMessage(node, me)) {
           const ackPromise = typeof sock.sendReceipt === 'function'
@@ -194,8 +217,26 @@ export function attachBaileysStabilityGuard({
   let wasBuffering = false;
   let stopped = false;
 
+  const pumpOfflineBatch = (now = Date.now(), idleMs = 2000) => {
+    if (stopped || !offlineInProgress || typeof sock.sendNode !== 'function') return false;
+    if (sock.ws && sock.ws.isOpen === false) return false;
+    if (now - lastOfflineActivityAt < idleMs) return false;
+    lastOfflineActivityAt = now;
+    stats.offlineBatchesRequested += 1;
+    Promise.resolve(
+      sock.sendNode({
+        tag: 'ib',
+        attrs: {},
+        content: [{ tag: 'offline_batch', attrs: { count: '100' } }],
+      })
+    ).catch(() => {});
+    return true;
+  };
+
   const checkBuffer = () => {
-    if (stopped || !sock.ev || typeof sock.ev.isBuffering !== 'function') return false;
+    if (stopped) return false;
+    pumpOfflineBatch();
+    if (!sock.ev || typeof sock.ev.isBuffering !== 'function') return false;
     const buffering = !!sock.ev.isBuffering();
     if (buffering && wasBuffering) {
       try {
@@ -211,7 +252,7 @@ export function attachBaileysStabilityGuard({
     return false;
   };
 
-  const timer = flushIntervalMs > 0 ? setInterval(checkBuffer, flushIntervalMs) : null;
+  const timer = flushIntervalMs > 0 ? setInterval(checkBuffer, Math.min(flushIntervalMs, 2500)) : null;
   if (timer && typeof timer.unref === 'function') timer.unref();
 
   const stop = () => {
@@ -240,5 +281,5 @@ export function attachBaileysStabilityGuard({
     });
   }
 
-  return { checkBuffer, stop, stats, handleExhaustedKey };
+  return { checkBuffer, pumpOfflineBatch, stop, stats, handleExhaustedKey };
 }

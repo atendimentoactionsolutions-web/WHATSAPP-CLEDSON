@@ -119,3 +119,41 @@ test('incoming group messages from other participants are acked immediately with
 
   guard.stop();
 });
+
+test('offline_batch pump requests subsequent batches until CB:ib,,offline completes', async () => {
+  const ws = new EventEmitter();
+  ws.isOpen = true;
+  const ev = new EventEmitter();
+  ev.isBuffering = () => false;
+  ev.flush = () => false;
+
+  const sentNodes = [];
+  const sock = {
+    ws,
+    ev,
+    sendNode: async (node) => { sentNodes.push(node); },
+  };
+  const guard = attachBaileysStabilityGuard({ sock, retryCache: createRetryGuardCache(), flushIntervalMs: 0 });
+
+  ws.emit('CB:ib,,offline_preview', {
+    tag: 'ib',
+    attrs: {},
+    content: [{ tag: 'offline_preview', attrs: { message: '741', receipt: '5000' } }],
+  });
+  assert.equal(guard.stats.offlinePreviews, 1);
+  assert.deepEqual(guard.stats.lastOfflinePreview, { message: '741', receipt: '5000' });
+
+  // Immediately after preview -> does not send duplicate batch yet
+  assert.equal(guard.pumpOfflineBatch(Date.now(), 2000), false);
+  // After idle interval -> pumps next offline_batch
+  assert.equal(guard.pumpOfflineBatch(Date.now() + 2500, 2000), true);
+  assert.equal(guard.stats.offlineBatchesRequested, 1);
+  assert.equal(sentNodes[0].content[0].tag, 'offline_batch');
+
+  // Once CB:ib,,offline arrives -> stops pumping
+  ws.emit('CB:ib,,offline', { tag: 'ib', attrs: {}, content: [{ tag: 'offline', attrs: { count: '741' } }] });
+  assert.equal(guard.stats.offlineCompleted, 1);
+  assert.equal(guard.pumpOfflineBatch(Date.now() + 10000, 2000), false);
+
+  guard.stop();
+});
