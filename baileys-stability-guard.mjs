@@ -112,6 +112,11 @@ export function attachBaileysStabilityGuard({
     forcedBufferFlushes: 0,
     exhaustedNacksSent: 0,
     ignoredGroupMessagesAcked: 0,
+    offlinePreviews: 0,
+    offlineCompleted: 0,
+    receiptsReceived: 0,
+    notificationsReceived: 0,
+    messagesReceived: 0,
     lastForcedFlushAt: null,
     lastExhaustedNackAt: null,
   };
@@ -132,15 +137,27 @@ export function attachBaileysStabilityGuard({
 
   let originalMessageListeners = null;
   let wrappedMessageListener = null;
+  const onOfflinePreview = () => { stats.offlinePreviews += 1; };
+  const onOfflineComplete = () => { stats.offlineCompleted += 1; };
+  const onReceipt = () => { stats.receiptsReceived += 1; };
+  const onNotification = () => { stats.notificationsReceived += 1; };
 
   if (sock.ws && typeof sock.ws.on === 'function') {
+    sock.ws.on('CB:ib,,offline_preview', onOfflinePreview);
+    sock.ws.on('CB:ib,,offline', onOfflineComplete);
+    sock.ws.on('CB:receipt', onReceipt);
+    sock.ws.on('CB:notification', onNotification);
     if (typeof sock.ws.listeners === 'function' && typeof sock.ws.removeAllListeners === 'function') {
       originalMessageListeners = sock.ws.listeners('CB:message').slice();
       sock.ws.removeAllListeners('CB:message');
       wrappedMessageListener = (node) => {
+        stats.messagesReceived += 1;
         const me = sock.user || sock.authState?.creds?.me;
-        if (shouldAckIncomingGroupMessage(node, me) && typeof sock.sendMessageAck === 'function') {
-          Promise.resolve(sock.sendMessageAck(node))
+        if (shouldAckIncomingGroupMessage(node, me)) {
+          const ackPromise = typeof sock.sendReceipt === 'function'
+            ? sock.sendReceipt(node.attrs.from, node.attrs.participant, [node.attrs.id], 'inactive')
+            : (typeof sock.sendMessageAck === 'function' ? sock.sendMessageAck(node, PARSING_ERROR_NACK) : Promise.resolve());
+          Promise.resolve(ackPromise)
             .then(() => {
               stats.ignoredGroupMessagesAcked += 1;
             })
@@ -202,6 +219,10 @@ export function attachBaileysStabilityGuard({
     stopped = true;
     if (timer) clearInterval(timer);
     if (sock.ws && typeof sock.ws.off === 'function') {
+      sock.ws.off('CB:ib,,offline_preview', onOfflinePreview);
+      sock.ws.off('CB:ib,,offline', onOfflineComplete);
+      sock.ws.off('CB:receipt', onReceipt);
+      sock.ws.off('CB:notification', onNotification);
       if (wrappedMessageListener) {
         sock.ws.off('CB:message', wrappedMessageListener);
       } else {

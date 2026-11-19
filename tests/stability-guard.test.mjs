@@ -92,17 +92,17 @@ test('incoming group messages from other participants are acked immediately with
   const forwarded = [];
   ws.on('CB:message', (node) => forwarded.push(node.attrs.id));
 
-  const acks = [];
+  const receipts = [];
   const sock = {
     ws,
     ev,
     user: { id: '5511930089729:12@s.whatsapp.net', lid: '252440997834971:12@lid' },
-    sendMessageAck: async (node, code) => { acks.push({ id: node.attrs.id, code }); },
+    sendReceipt: async (jid, participant, ids, type) => { receipts.push({ jid, participant, ids, type }); },
   };
   const retryCache = createRetryGuardCache({ maxRetries: 2 });
   const guard = attachBaileysStabilityGuard({ sock, retryCache, flushIntervalMs: 0 });
 
-  // Other participant in group -> acked immediately, NOT forwarded to decrypt
+  // Other participant in group -> receipted as inactive immediately, NOT forwarded to decrypt
   ws.emit('CB:message', { tag: 'message', attrs: { id: 'GRP_OTHER', from: '123@g.us', participant: '999@lid', type: 'media' } });
   // Own message in group (via lid or participant_pn) -> forwarded normally
   ws.emit('CB:message', { tag: 'message', attrs: { id: 'GRP_SELF_LID', from: '123@g.us', participant: '252440997834971:39@lid' } });
@@ -111,9 +111,10 @@ test('incoming group messages from other participants are acked immediately with
   ws.emit('CB:message', { tag: 'message', attrs: { id: 'DM_MSG', from: '5511999999999@s.whatsapp.net' } });
 
   await new Promise((r) => setTimeout(r, 10));
-  assert.deepEqual(acks, [{ id: 'GRP_OTHER', code: undefined }]);
+  assert.deepEqual(receipts, [{ jid: '123@g.us', participant: '999@lid', ids: ['GRP_OTHER'], type: 'inactive' }]);
   assert.deepEqual(forwarded, ['GRP_SELF_LID', 'GRP_SELF_PN', 'DM_MSG']);
   assert.equal(guard.stats.ignoredGroupMessagesAcked, 1);
+  assert.equal(guard.stats.messagesReceived, 4);
   assert.equal(shouldAckIncomingGroupMessage({ tag: 'message', attrs: { from: '123@g.us', participant: '999@lid' } }, sock.user), true);
 
   guard.stop();
