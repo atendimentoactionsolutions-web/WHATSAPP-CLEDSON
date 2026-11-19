@@ -8,6 +8,39 @@
 
 export const PARSING_ERROR_NACK = 487;
 
+function extractJidUser(jid) {
+  if (typeof jid !== 'string' || !jid) return '';
+  const at = jid.indexOf('@');
+  const left = at >= 0 ? jid.slice(0, at) : jid;
+  const colon = left.indexOf(':');
+  return colon >= 0 ? left.slice(0, colon) : left;
+}
+
+function isSameUserJid(a, b) {
+  const ua = extractJidUser(a);
+  const ub = extractJidUser(b);
+  return Boolean(ua && ub && ua === ub);
+}
+
+// Other participants' incoming messages in hundreds of buy/sell groups are never
+// read by this bot, yet decrypt failures leave them unacked in Baileys and clog
+// WhatsApp's in-flight stanza window (stalling receipts and causing 50m stream errors).
+// Receipts and customer retry requests arrive on CB:receipt, never CB:message.
+export function shouldAckIncomingGroupMessage(node, user) {
+  if (!node || node.tag !== 'message') return false;
+  const from = node.attrs?.from;
+  const participant = node.attrs?.participant;
+  if (typeof from !== 'string' || !from.endsWith('@g.us') || !participant) return false;
+  const myIds = [user?.id, user?.lid].filter(Boolean);
+  const senderIds = [participant, node.attrs?.participant_pn].filter(Boolean);
+  for (const me of myIds) {
+    for (const sender of senderIds) {
+      if (isSameUserJid(me, sender)) return false;
+    }
+  }
+  return true;
+}
+
 // Prevents Baileys's requestPlaceholderResend from sleeping 5000ms per
 // undecryptable/unavailable group message inside offlineNodeProcessor & retryMutex,
 // which otherwise stalls receipt and customer-retry handling for 40+ minutes.
@@ -78,6 +111,7 @@ export function attachBaileysStabilityGuard({
   const stats = {
     forcedBufferFlushes: 0,
     exhaustedNacksSent: 0,
+    ignoredGroupMessagesAcked: 0,
     lastForcedFlushAt: null,
     lastExhaustedNackAt: null,
   };
@@ -96,8 +130,30 @@ export function attachBaileysStabilityGuard({
     }
   };
 
+  let originalMessageListeners = null;
+  let wrappedMessageListener = null;
+
   if (sock.ws && typeof sock.ws.on === 'function') {
-    sock.ws.on('CB:message', trackNode);
+    if (typeof sock.ws.listeners === 'function' && typeof sock.ws.removeAllListeners === 'function') {
+      originalMessageListeners = sock.ws.listeners('CB:message').slice();
+      sock.ws.removeAllListeners('CB:message');
+      wrappedMessageListener = (node) => {
+        const me = sock.user || sock.authState?.creds?.me;
+        if (shouldAckIncomingGroupMessage(node, me) && typeof sock.sendMessageAck === 'function') {
+          Promise.resolve(sock.sendMessageAck(node))
+            .then(() => {
+              stats.ignoredGroupMessagesAcked += 1;
+            })
+            .catch(() => {});
+          return;
+        }
+        trackNode(node);
+        for (const fn of originalMessageListeners) fn.call(sock.ws, node);
+      };
+      sock.ws.on('CB:message', wrappedMessageListener);
+    } else {
+      sock.ws.on('CB:message', trackNode);
+    }
   }
 
   const handleExhaustedKey = (cacheKey) => {
@@ -146,7 +202,11 @@ export function attachBaileysStabilityGuard({
     stopped = true;
     if (timer) clearInterval(timer);
     if (sock.ws && typeof sock.ws.off === 'function') {
-      sock.ws.off('CB:message', trackNode);
+      if (wrappedMessageListener) {
+        sock.ws.off('CB:message', wrappedMessageListener);
+      } else {
+        sock.ws.off('CB:message', trackNode);
+      }
     }
     if (retryCache && typeof retryCache.setOnExhausted === 'function') {
       retryCache.setOnExhausted(null);

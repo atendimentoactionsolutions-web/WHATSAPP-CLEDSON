@@ -158,7 +158,7 @@ async function sendTrackedMessage(socket, jid, content, campaign = null) {
   });
 }
 
-const msgRetryCounterCache = createRetryGuardCache({ maxRetries: 5, maxSize: 5000, maxExhausted: 2000 });
+const msgRetryCounterCache = createRetryGuardCache({ maxRetries: 2, maxSize: 5000, maxExhausted: 2000 });
 const placeholderResendCache = createNoopPlaceholderCache();
 let activeSocketGuard = null;
 
@@ -849,6 +849,7 @@ async function initWhatsApp(forceReset = false) {
           keys: makeCacheableSignalKeyStore(state.keys, logger),
         },
         msgRetryCounterCache,
+        maxMsgRetryCount: 2,
         placeholderResendCache,
         shouldIgnoreJid: (jid) => jid === "status@broadcast" || String(jid || "").endsWith("@newsletter"),
         browser: ["WhatsApp Cledson", "Chrome", "124.0.0.0"],
